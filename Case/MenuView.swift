@@ -64,6 +64,7 @@ struct MenuView: View {
             NSApp.activate()
             openWindow(id: "setup")
         }
+        Button("Check for Updates…") { model.checkForUpdates() }
 
         Divider()
 

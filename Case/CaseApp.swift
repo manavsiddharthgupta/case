@@ -1,3 +1,4 @@
+import Sparkle
 import SwiftUI
 
 @main
@@ -82,6 +83,9 @@ final class AppModel {
     let assistant: Assistant
     let recorder: MeetingRecorder
     let watcher = MeetingWatcher()
+    /// Looks for a new version once a day, and asks before installing it.
+    @ObservationIgnored private let updates = SPUStandardUpdaterController(
+        startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
     private(set) var claude: ClaudeCLI.Status = .checking
     /// What the window is showing.
     var page = Page.chats
@@ -173,6 +177,11 @@ final class AppModel {
         if !hadAccessibility, permissions.granted[.accessibility] == true {
             hotkey.start()
         }
+    }
+
+    func checkForUpdates() {
+        NSApp.activate()
+        updates.checkForUpdates(nil)
     }
 
     func finishSetup() {
