@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct CaseApp: App {
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -9,13 +10,7 @@ struct CaseApp: App {
             MenuView()
                 .environment(model)
         } label: {
-            if model.recorder.phase == .recording {
-                Image(systemName: "record.circle")
-            } else if model.recorder.phase == .paused {
-                Image(systemName: "pause.circle")
-            } else {
-                Image(nsImage: .menuBarMark)
-            }
+            MenuBarLabel(model: model, appDelegate: appDelegate)
         }
 
         Window("Case", id: "main") {
@@ -24,7 +19,7 @@ struct CaseApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1040, height: 680)
-        .defaultLaunchBehavior(.suppressed)
+        .defaultLaunchBehavior(model.needsSetup ? .suppressed : .presented)
         .restorationBehavior(.disabled)
 
         Window("Set up Case", id: "setup") {
@@ -35,6 +30,41 @@ struct CaseApp: App {
         .windowResizability(.contentSize)
         // Open setup on launch until it's been finished, or if a permission has gone missing since.
         .defaultLaunchBehavior(model.needsSetup ? .presented : .suppressed)
+    }
+}
+
+/// Clicking Case's icon while it's running goes to `onReopen`, not to whichever window macOS picks.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var onReopen: () -> Void = {}
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        onReopen()
+        return false
+    }
+}
+
+/// The menu bar icon. It's the one view that's always there, so it opens windows for the app icon too.
+private struct MenuBarLabel: View {
+    let model: AppModel
+    let appDelegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Group {
+            if model.recorder.phase == .recording {
+                Image(systemName: "record.circle")
+            } else if model.recorder.phase == .paused {
+                Image(systemName: "pause.circle")
+            } else {
+                Image(nsImage: .menuBarMark)
+            }
+        }
+        .task {
+            appDelegate.onReopen = { [model, openWindow] in
+                NSApp.activate()
+                openWindow(id: model.needsSetup ? "setup" : "main")
+            }
+        }
     }
 }
 

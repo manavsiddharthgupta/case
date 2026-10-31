@@ -86,9 +86,10 @@ struct PageTitle: View {
 }
 
 /// What shows when a page has nothing on it yet.
-struct EmptyNote: View {
+struct EmptyNote<Action: View>: View {
     let title: String
     let detail: String
+    @ViewBuilder var action: Action
 
     var body: some View {
         VStack(spacing: 6) {
@@ -100,7 +101,15 @@ struct EmptyNote: View {
                 .foregroundStyle(Theme.muted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 320)
+            action
+                .padding(.top, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+extension EmptyNote where Action == EmptyView {
+    init(title: String, detail: String) {
+        self.init(title: title, detail: detail) { EmptyView() }
     }
 }

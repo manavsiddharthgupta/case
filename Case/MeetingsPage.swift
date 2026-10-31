@@ -11,26 +11,28 @@ struct MeetingsPage: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ListColumn(title: "Meetings") {
-                if !recorder.isActive {
-                    Button("Start") { Task { await recorder.start() } }
-                        .buttonStyle(PillButtonStyle(filled: true))
-                }
-            } rows: {
-                ForEach(model.meetings.meetings) { meeting in
-                    ListRow(title: meeting.title, detail: detail(for: meeting), selected: meeting.id == selected) {
-                        selected = meeting.id
+            // The list only shows once there's something in it; until then Start sits in the middle.
+            if !model.meetings.meetings.isEmpty {
+                ListColumn(title: "Meetings") {
+                    startButton
+                } rows: {
+                    ForEach(model.meetings.meetings) { meeting in
+                        ListRow(title: meeting.title, detail: detail(for: meeting), selected: meeting.id == selected) {
+                            selected = meeting.id
+                        }
+                        .contextMenu {
+                            Button("Delete Meeting", role: .destructive) { deleting = meeting.id }
+                                .disabled(meeting.id == recorder.meetingID)
+                        }
                     }
-                    .contextMenu {
-                        Button("Delete Meeting", role: .destructive) { deleting = meeting.id }
-                            .disabled(meeting.id == recorder.meetingID)
-                    }
                 }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                Rule(vertical: true)
             }
-            Rule(vertical: true)
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .animation(.snappy(duration: 0.25), value: model.meetings.meetings.isEmpty)
         .onAppear { selected = recorder.meetingID ?? selected ?? model.meetings.meetings.first?.id }
         .onChange(of: recorder.meetingID) { _, id in
             if let id { selected = id }
@@ -58,10 +60,25 @@ struct MeetingsPage: View {
                 FinishedMeeting(meeting: meeting)
             }
         } else if let problem = recorder.problem {
-            EmptyNote(title: "That didn't work", detail: problem)
+            EmptyNote(title: "That didn't work", detail: problem) { emptyStart }
         } else {
             EmptyNote(title: "No bot joins the call",
-                      detail: "Press Start when a meeting begins. Case listens through your Mac and keeps only the text.")
+                      detail: "Press Start when a meeting begins. Case listens through your Mac and keeps only the text.") {
+                emptyStart
+            }
+        }
+    }
+
+    @ViewBuilder private var startButton: some View {
+        if !recorder.isActive {
+            Button("Start") { Task { await recorder.start() } }
+                .buttonStyle(PillButtonStyle(filled: true))
+        }
+    }
+
+    @ViewBuilder private var emptyStart: some View {
+        if model.meetings.meetings.isEmpty {
+            startButton
         }
     }
 

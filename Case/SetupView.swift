@@ -18,6 +18,7 @@ struct SetupView: View {
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
     @State var step = Step.claude
     @State var hearing = Hearing.checking
     @State private var isPlaced = false
@@ -118,6 +119,7 @@ struct SetupView: View {
             step = next
         } else {
             model.finishSetup()
+            openWindow(id: "main")
             dismissWindow(id: "setup")
         }
     }

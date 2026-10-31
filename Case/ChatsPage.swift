@@ -12,28 +12,33 @@ struct ChatsPage: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            ListColumn(title: "Chats") {
-                Button("New") {
-                    selected = nil
-                    typing = true
-                }
-                .buttonStyle(PillButtonStyle())
-            } rows: {
-                ForEach(model.chats.chats) { chat in
-                    ListRow(title: chat.title, detail: chat.updated.listLabel, selected: chat.id == selected) {
-                        selected = chat.id
+            // The list only shows once there's something in it.
+            if !model.chats.chats.isEmpty {
+                ListColumn(title: "Chats") {
+                    Button("New") {
+                        selected = nil
+                        typing = true
                     }
-                    .contextMenu {
-                        Button("Delete Chat", role: .destructive) { delete(chat.id) }
+                    .buttonStyle(PillButtonStyle())
+                } rows: {
+                    ForEach(model.chats.chats) { chat in
+                        ListRow(title: chat.title, detail: chat.updated.listLabel, selected: chat.id == selected) {
+                            selected = chat.id
+                        }
+                        .contextMenu {
+                            Button("Delete Chat", role: .destructive) { delete(chat.id) }
+                        }
                     }
                 }
+                .transition(.move(edge: .leading).combined(with: .opacity))
+                Rule(vertical: true)
             }
-            Rule(vertical: true)
             VStack(spacing: 0) {
                 conversation
                 composer
             }
         }
+        .animation(.snappy(duration: 0.25), value: model.chats.chats.isEmpty)
         .onAppear { selected = assistant.currentChat ?? model.chats.chats.first?.id }
         // A chat started at the cursor, or from the box here.
         .onChange(of: assistant.currentChat) { _, chat in
