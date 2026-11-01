@@ -65,7 +65,9 @@ final class Permissions {
     }
 
     /// Shows the system prompt the first time; after that macOS won't ask again,
-    /// so we open the right page in System Settings instead.
+    /// so we open the right page in System Settings too. We still ask every time, because
+    /// asking is what puts this copy of Case on that page. A differently signed build
+    /// counts as a new app there, even though it shares these saved settings.
     func request(_ kind: Kind) async {
         let askedKey = "permissions.asked.\(kind.rawValue)"
         let askedBefore = UserDefaults.standard.bool(forKey: askedKey)
@@ -73,17 +75,11 @@ final class Permissions {
 
         switch kind {
         case .screenRecording:
-            if askedBefore {
-                NSWorkspace.shared.open(kind.settingsURL)
-            } else {
-                CGRequestScreenCaptureAccess()
-            }
+            CGRequestScreenCaptureAccess()
+            if askedBefore { NSWorkspace.shared.open(kind.settingsURL) }
         case .accessibility:
-            if askedBefore {
-                NSWorkspace.shared.open(kind.settingsURL)
-            } else {
-                AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-            }
+            AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+            if askedBefore { NSWorkspace.shared.open(kind.settingsURL) }
         case .microphone:
             if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
                 await AVCaptureDevice.requestAccess(for: .audio)

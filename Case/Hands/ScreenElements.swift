@@ -487,6 +487,14 @@ enum ScreenElements {
         return (lines.joined(separator: "\n"), false)
     }
 
+    /// The title of an app's front window. Only for other apps: never point this at Case itself.
+    nonisolated static func windowTitle(of pid: pid_t) -> String {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.25)
+        guard let window = copy(app, kAXFocusedWindowAttribute) as AXUIElement? ?? copy(app, kAXMainWindowAttribute) else { return "" }
+        return copy(window, kAXTitleAttribute) ?? ""
+    }
+
     /// The box you're typing in right now.
     nonisolated struct Focus: Sendable {
         var role = ""

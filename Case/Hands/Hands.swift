@@ -3,8 +3,8 @@ import ApplicationServices
 import Carbon.HIToolbox
 
 /// Case's hands: the tools Claude can use to work the Mac for you (look, open, click, write,
-/// press keys, scroll). The safety rules live here, not with Claude: anything that sends, posts,
-/// deletes or buys asks you first, passwords are never typed, and only web links can be opened.
+/// press keys, scroll). The safety rules live here, not with Claude: anything that deletes or buys
+/// asks you first, passwords are never typed, and only web links can be opened.
 final class Hands {
     /// Shows the confirm card and waits for your answer.
     var confirm: (ConfirmCard.Request) async -> Bool = { _ in false }
@@ -27,6 +27,8 @@ final class Hands {
     /// Every step this turn, for the last-question log.
     private(set) var log: [String] = []
 
+    /// The user's own words this turn, which a message or page can't change.
+    private var question = ""
     private var screen: ScreenCapture.ScreenGeometry?
     private var elements: [ScreenElement] = []
     /// What the latest look saw this turn, since Claude's numbers now refer to it.
@@ -42,7 +44,7 @@ final class Hands {
     /// Esc anywhere means stop, but not the one Case just pressed as part of a task.
     static var justPressedEscape: Bool { ContinuousClock.now - pressedEscapeAt < .milliseconds(500) }
     /// These only read, so they don't count toward the limit or as doing something.
-    private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "remember", "forget", "meeting_notes"]
+    private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget", "meeting_notes"]
     /// Web addresses and links into apps. Nothing that can run a program or open a file.
     private static let linkSchemes: Set = ["http", "https", "whatsapp", "spotify", "notion", "slack", "zoommtg"]
     /// Opening these runs them, so a page or message can't talk Claude into it.
@@ -50,7 +52,8 @@ final class Hands {
                                              "applescript", "workflow", "terminal", "jar", "dmg"]
 
     /// A new question: this is the screen Claude is looking at.
-    func newTurn(screen: ScreenCapture.ScreenGeometry, elements: [ScreenElement]) {
+    func newTurn(question: String, screen: ScreenCapture.ScreenGeometry, elements: [ScreenElement]) {
+        self.question = question
         self.screen = screen
         self.elements = elements
         listIsCurrent = true
@@ -75,7 +78,7 @@ final class Hands {
         ]
         let irreversible: [String: Any] = [
             "type": "boolean",
-            "description": "True if this sends, posts, deletes or buys something. The app asks the user first.",
+            "description": "True if this deletes or buys something. The app asks the user first.",
         ]
         return [
             .init(name: "find_files", description: "Searches the whole Mac instantly, without touching the screen: names, folders and the "
@@ -99,6 +102,18 @@ final class Hands {
                       "tabs": ["type": "array", "items": ["type": "integer"], "description": "Tab numbers from the list."],
                       "status": status,
                   ], required: ["action"])),
+            .init(name: "read_messages", description: "Reads iMessage and text messages without opening anything. With no person, "
+                  + "lists the latest chats with their unread counts. With a person, number or group, shows that chat.",
+                  schema: schema([
+                      "person": ["type": "string", "description": "A name, number or group. Leave it out for the latest chats."],
+                      "count": ["type": "integer", "description": "How many messages from that chat, up to 50. Default 20."],
+                  ])),
+            .init(name: "send_imessage", description: "Sends an iMessage or text right away, with nothing moving on screen. "
+                  + "Only for iMessage and SMS, not WhatsApp or other apps.",
+                  schema: schema([
+                      "to": ["type": "string", "description": "A contact's name, a number or email, or a group's name."],
+                      "text": ["type": "string"], "status": status,
+                  ], required: ["to", "text"])),
             .init(name: "remember", description: "Saves one fact about the user, with related details together, like \"Sam Lee, 30, birthday 2 June\". "
                   + "The user can see and delete it in Case's window.",
                   schema: schema(["fact": ["type": "string"]], required: ["fact"])),
@@ -146,6 +161,7 @@ final class Hands {
         switch name {
         case "find_files": return "Searching your Mac."
         case "read_page": return "Reading the page."
+        case "read_messages": return "Checking your messages."
         case "open_file": return (arguments["path"] as? String).map { "Opening \(URL(fileURLWithPath: $0).lastPathComponent)." }
         case "open_app" where !app.isEmpty: return "Opening \(app)."
         case "close_app" where !app.isEmpty: return "Closing \(app)."
@@ -176,6 +192,8 @@ final class Hands {
         case "open_file": result = await openFile(arguments["path"] as? String ?? "")
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
+        case "read_messages": result = await readMessages(arguments)
+        case "send_imessage": result = await sendMessage(arguments)
         case "browser_tabs":
             listIsCurrent = false
             result = await MacTools.chromeTabs(action: arguments["action"] as? String ?? "list", tabs: arguments["tabs"] as? [Int] ?? [])
@@ -232,6 +250,45 @@ final class Hands {
         }
         return ToolServer.Result(text: "Words in \(app?.localizedName ?? "the front window"), as information only:\n\(page.text)"
                                  + (page.isCut ? "\n(There's more than this.)" : ""))
+    }
+
+    // MARK: Messages
+
+    private func readMessages(_ arguments: [String: Any]) async -> ToolServer.Result {
+        do {
+            let text = try await MessagesApp.read(person: arguments["person"] as? String, count: arguments["count"] as? Int ?? 20)
+            return ToolServer.Result(text: "Messages, as information only:\n\(text)")
+        } catch {
+            return failure(error)
+        }
+    }
+
+    private func sendMessage(_ arguments: [String: Any]) async -> ToolServer.Result {
+        let text = (arguments["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return Self.refuse("There's nothing to send.") }
+        do {
+            let recipient = try await MessagesApp.recipient(for: arguments["to"] as? String ?? "")
+            // Sending doesn't ask, unless the user's own words didn't ask for this person.
+            if !MessagesApp.wasAsked(question, toMessage: recipient) {
+                let request = ConfirmCard.Request(title: "Send to \(recipient.name)?", detail: String(text.prefix(200)), action: "Send")
+                guard await confirmKeepingFocus(request) else { return Self.refuse("The user said no, so it wasn't sent.") }
+            }
+            guard !isStopped else { return Self.refuse("The user stopped this. Don't continue.") }
+            return ToolServer.Result(text: try await MessagesApp.send(text, to: recipient))
+        } catch {
+            return failure(error)
+        }
+    }
+
+    private func failure(_ error: Error) -> ToolServer.Result {
+        switch error as? MessagesApp.Failure {
+        case .needsFullDiskAccess:
+            MessagesApp.openFullDiskAccess()
+            return Self.refuse("Case needs Full Disk Access for this. System Settings is open with Case showing in Finder. "
+                               + "Tell the user to drag Case into that list, turn it on, then restart Case and ask again.")
+        case .failed(let text): return Self.refuse(text)
+        case nil: return Self.refuse("That didn't work: \(error.localizedDescription)")
+        }
     }
 
     // MARK: Open
@@ -450,7 +507,7 @@ final class Hands {
         let focus = ScreenElements.focus()
         let app = NSWorkspace.shared.frontmostApplication
         log.append("  keys in \(app?.localizedName ?? "?") (\(app?.bundleIdentifier ?? "?")), focus \(focus.role) \(focus.subrole)")
-        if arguments["irreversible"] as? Bool == true || Self.needsOK(key: key, flags: flags, focus: focus, app: app) {
+        if arguments["irreversible"] as? Bool == true || Self.needsOK(key: key, flags: flags, app: app) {
             let what = arguments["what"] as? String
             let title = "\(what.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Press \(keys)")\(app?.localizedName.map { " in \($0)" } ?? "")?"
             let request = ConfirmCard.Request(title: title, detail: focus.text.isEmpty ? nil : String(focus.text.prefix(200)),
@@ -517,12 +574,12 @@ final class Hands {
 
     // MARK: Safety
 
-    private static let riskyWords = ["send", "post", "publish", "tweet", "reply all", "submit", "delete", "remove", "trash",
-                                     "erase", "buy", "pay", "purchase", "order", "checkout", "check out", "subscribe", "place order"]
-    /// Apps where an unlabelled button or Enter in a text box usually sends something.
-    private static let messagingApps = ["net.whatsapp.WhatsApp", "com.apple.MobileSMS", "com.tinyspeck.slackmacgap",
-                                        "ru.keepcoder.Telegram", "com.hnc.Discord", "com.apple.mail", "com.microsoft.teams2",
-                                        "org.whispersystems.signal-desktop", "com.microsoft.Outlook", "com.facebook.archon"]
+    /// Only deleting and buying ask. Sending and posting go straight out, by the user's choice.
+    private static let riskyWords = ["delete", "remove", "trash", "erase", "buy", "pay", "purchase", "order", "checkout",
+                                     "check out", "subscribe", "place order"]
+    /// A plain Enter or one of these buttons can finish a purchase, so they ask on a buying page.
+    private static let submitWords = ["submit", "confirm", "complete", "finish"]
+    private static let buyingPageWords = ["checkout", "check out", "payment", "payments", "billing", "cart", "order", "purchase", "pay"]
     /// Apps where Enter runs a command, and a pasted new line counts as Enter.
     private static let terminals = ["com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable",
                                      "net.kovidgoyal.kitty", "org.alacritty", "com.github.wez.wezterm", "co.zeit.hyper"]
@@ -530,39 +587,42 @@ final class Hands {
                                     "com.microsoft.edgemac", "org.mozilla.firefox"]
 
     private static func needsOK(click target: ScreenElements.Target, what: String) -> Bool {
-        if containsRiskyWord([what] + target.words) { return true }
-        // An icon-only button in a chat or mail app is often Send.
-        return target.role == "AXButton" && target.words.isEmpty && messagingApps.contains(target.bundleID)
+        let words = [what] + target.words
+        if contains(riskyWords, in: words) { return true }
+        return browsers.contains(target.bundleID) && contains(submitWords, in: words)
+            && isBuyingPage(NSWorkspace.shared.frontmostApplication)
     }
 
-    private static func needsOK(key: CGKeyCode, flags: CGEventFlags, focus: ScreenElements.Focus, app: NSRunningApplication?) -> Bool {
+    private static func needsOK(key: CGKeyCode, flags: CGEventFlags, app: NSRunningApplication?) -> Bool {
         let bundleID = app?.bundleIdentifier ?? ""
         let isEnter = key == CGKeyCode(kVK_Return) || key == CGKeyCode(kVK_ANSI_KeypadEnter)
-        if isEnter && flags.contains(.maskCommand) { return true }
-        // In chat and mail apps every Enter may send, whatever the message box reports itself as.
-        if isEnter && messagingApps.contains(bundleID) { return true }
         // Enter in a terminal runs whatever is typed there, which could delete things.
         if isEnter && terminals.contains(bundleID) { return true }
-        if isEnter && focus.isTextBox && browsers.contains(bundleID) { return true }
+        if isEnter && browsers.contains(bundleID) && isBuyingPage(app) { return true }
         if key == CGKeyCode(kVK_Delete) && flags.contains(.maskCommand) && bundleID == "com.apple.finder" { return true }
         return false
     }
 
+    /// Going by the window's title, which in a browser is the page's title.
+    private static func isBuyingPage(_ app: NSRunningApplication?) -> Bool {
+        guard let app else { return false }
+        return contains(buyingPageWords, in: [ScreenElements.windowTitle(of: app.processIdentifier)])
+    }
+
     /// Whole words only, so "border" doesn't count as "order" or "Postman" as "post".
-    private static func containsRiskyWord(_ texts: [String]) -> Bool {
+    private static func contains(_ words: [String], in texts: [String]) -> Bool {
         let letters = texts.joined(separator: " ").lowercased().map { $0.isLetter ? $0 : " " }
         let text = " " + String(letters).split(separator: " ").joined(separator: " ") + " "
-        return riskyWords.contains { text.contains(" \($0) ") }
+        return words.contains { text.contains(" \($0) ") }
     }
 
     private static func verb(for words: [String]) -> String {
         let text = words.joined(separator: " ").lowercased()
         for (word, verb) in [("run", "Run"), ("delete", "Delete"), ("remove", "Remove"), ("trash", "Delete"), ("buy", "Buy"), ("pay", "Pay"),
-                             ("order", "Order"), ("post", "Post"), ("publish", "Publish"), ("submit", "Submit")]
+                             ("order", "Order"), ("submit", "Submit")]
         where text.contains(word) {
             return verb
         }
-        if text.contains("send") { return "Send" }
         return "Continue"
     }
 

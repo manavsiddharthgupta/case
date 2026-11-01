@@ -386,7 +386,7 @@ final class Assistant {
                         \(text)
                         """
                 }
-                hands.newTurn(screen: screen, elements: scan.elements)
+                hands.newTurn(question: text, screen: screen, elements: scan.elements)
                 let selected = await picked?.value ?? ""
 
                 if !selected.isEmpty {

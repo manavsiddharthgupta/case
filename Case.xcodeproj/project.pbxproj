@@ -207,7 +207,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Case;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Case controls Chrome tabs when you ask.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Case controls Chrome and Messages when you ask.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Case shows names instead of numbers, and finds who you want to message.";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Case looks here when you ask it to find a file.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Case looks here when you ask it to find a file.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Case looks here when you ask it to find a file.";
@@ -242,7 +243,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Case;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Case controls Chrome tabs when you ask.";
+				INFOPLIST_KEY_NSAppleEventsUsageDescription = "Case controls Chrome and Messages when you ask.";
+				INFOPLIST_KEY_NSContactsUsageDescription = "Case shows names instead of numbers, and finds who you want to message.";
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "Case looks here when you ask it to find a file.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "Case looks here when you ask it to find a file.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "Case looks here when you ask it to find a file.";
