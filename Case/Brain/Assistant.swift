@@ -60,6 +60,8 @@ final class Assistant {
     @ObservationIgnored private let toolServer = ToolServer()
     @ObservationIgnored private let hands = Hands()
     @ObservationIgnored private let confirmCard = ConfirmCard()
+    /// The hotkey is held to answer the confirm bar.
+    @ObservationIgnored private var answeringCard = false
     @ObservationIgnored private var history: [(question: String, answer: String)] = []
     @ObservationIgnored private var pendingRecap: String?
     @ObservationIgnored private var tidyTask: Task<Void, Never>?
@@ -98,8 +100,13 @@ final class Assistant {
         toolServer.call = { [hands] name, arguments in await hands.call(name, arguments) }
         hands.confirm = { [weak self] request in
             guard let self else { return false }
+            if !windowTurn {
+                speaker.stop()
+                speaker.sayIfIdle(request.title)
+            }
             return await confirmCard.ask(request, near: pointer.anchor)
         }
+        hands.confirmWentUnanswered = { [weak self] in self?.confirmCard.wentUnanswered ?? false }
         hands.tap = { [weak self] rect in await self?.pointer.tap(at: rect) }
         // Like a person working beside you: each step shows in the caption, and is said out loud
         // unless the last one is still being said.
@@ -148,6 +155,13 @@ final class Assistant {
 
     func hotkeyPressed() {
         speaker.stop()
+        // A question is waiting, so this is the answer to it, not a new request.
+        if confirmCard.isAsking {
+            answeringCard = true
+            confirmCard.showListening()
+            voice.start()
+            return
+        }
         selection = Task { await ScreenElements.selectedText() }
         if !history.isEmpty, ContinuousClock.now - lastAsked > Self.idleReset { newChat() }
 
@@ -162,6 +176,11 @@ final class Assistant {
     }
 
     func hotkeyReleased() {
+        if answeringCard {
+            answeringCard = false
+            Task { confirmCard.answer(heard: (try? await voice.stop()) ?? "") }
+            return
+        }
         if phase == .listening {
             finishListening()
         } else if holdTask != nil, !isBusy {
@@ -174,6 +193,7 @@ final class Assistant {
 
     /// ⌥⌘ turned out to be part of a shortcut like ⌥⌘D: back out without asking anything.
     func hotkeyCancelled() {
+        stopAnsweringCard()
         holdTask?.cancel()
         holdTask = nil
         selection = nil
@@ -181,6 +201,12 @@ final class Assistant {
         phase = .ready
         trailTask?.cancel()
         pointer.setCaption(nil)
+        Task { _ = try? await voice.stop() }
+    }
+
+    private func stopAnsweringCard() {
+        guard answeringCard else { return }
+        answeringCard = false
         Task { _ = try? await voice.stop() }
     }
 
@@ -246,6 +272,7 @@ final class Assistant {
     /// Esc: stop talking, listening and pointing, and clear the bubble.
     func dismiss() {
         hands.isStopped = true
+        stopAnsweringCard()
         confirmCard.cancel()
         guard phase != .ready || speaker.isSpeaking || pointer.caption != nil else { return }
         trailTask?.cancel()

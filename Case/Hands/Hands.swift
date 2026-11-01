@@ -8,6 +8,8 @@ import Carbon.HIToolbox
 final class Hands {
     /// Shows the confirm card and waits for your answer.
     var confirm: (ConfirmCard.Request) async -> Bool = { _ in false }
+    /// Whether the last question ran out of time, rather than the user saying no.
+    var confirmWentUnanswered: () -> Bool = { false }
     /// Flies the buddy to a spot (AppKit coordinates) and taps it; returns once it has landed.
     var tap: (CGRect) async -> Void = { _ in }
     /// Runs something with Case's floating windows out of the way.
@@ -80,6 +82,11 @@ final class Hands {
             "type": "boolean",
             "description": "True if this deletes or buys something. The app asks the user first.",
         ]
+        let summary: [String: Any] = [
+            "type": "string",
+            "description": "When irreversible is true, what will happen in plain words, like \"Delete 3 files from Downloads\". "
+                + "The user reads this when deciding.",
+        ]
         return [
             .init(name: "find_files", description: "Searches the whole Mac instantly, without touching the screen: names, folders and the "
                   + "words inside documents, best match first. It forgives small spelling mistakes. "
@@ -135,7 +142,7 @@ final class Hands {
                   schema: schema([
                       "element": ["type": "integer"], "x": ["type": "number"], "y": ["type": "number"],
                       "what": ["type": "string", "description": "What you're clicking, like \"the Send button\"."],
-                      "status": status, "irreversible": irreversible,
+                      "status": status, "irreversible": irreversible, "summary": summary,
                   ], required: ["what"])),
             .init(name: "write", description: "Types text into the box that has focus (click the box first). It never presses Enter.",
                   schema: schema(["text": ["type": "string"], "status": status], required: ["text"])),
@@ -143,7 +150,7 @@ final class Hands {
                   schema: schema([
                       "keys": ["type": "string"],
                       "what": ["type": "string", "description": "What it does, like \"send the message\"."],
-                      "status": status, "irreversible": irreversible,
+                      "status": status, "irreversible": irreversible, "summary": summary,
                   ], required: ["keys"])),
             .init(name: "scroll", description: "Scrolls the screen, or a numbered element from the latest list.",
                   schema: schema([
@@ -271,7 +278,7 @@ final class Hands {
             // Sending doesn't ask, unless the user's own words didn't ask for this person.
             if !MessagesApp.wasAsked(question, toMessage: recipient) {
                 let request = ConfirmCard.Request(title: "Send to \(recipient.name)?", detail: String(text.prefix(200)), action: "Send")
-                guard await confirmKeepingFocus(request) else { return Self.refuse("The user said no, so it wasn't sent.") }
+                guard await confirmKeepingFocus(request) else { return declined("it wasn't sent") }
             }
             guard !isStopped else { return Self.refuse("The user stopped this. Don't continue.") }
             return ToolServer.Result(text: try await MessagesApp.send(text, to: recipient))
@@ -442,9 +449,12 @@ final class Hands {
         guard !target.isOurs else { return Self.refuse("That spot is covered by a Case window; try look again.") }
 
         if arguments["irreversible"] as? Bool == true || Self.needsOK(click: target, what: what) {
-            let request = ConfirmCard.Request(title: "Click \(what)\(target.appName.isEmpty ? "" : " in \(target.appName)")?",
-                                              detail: nil, action: Self.verb(for: [what] + target.words))
-            guard await confirmKeepingFocus(request) else { return Self.refuse("The user said no, so it wasn't clicked.") }
+            let place = target.appName.isEmpty ? "" : " in \(target.appName)"
+            let summary = Self.summary(arguments)
+            let request = ConfirmCard.Request(title: summary.map { "\($0)?" } ?? "Click \(what)\(place)?", detail: nil,
+                                              action: Self.verb(for: [summary ?? ""] + [what] + target.words),
+                                              note: summary == nil ? nil : "Clicks \(what)\(place)")
+            guard await confirmKeepingFocus(request) else { return declined("it wasn't clicked") }
         }
 
         await tap(screen.appKitRect(fromTopLeft: target.frame ?? frame))
@@ -509,10 +519,13 @@ final class Hands {
         log.append("  keys in \(app?.localizedName ?? "?") (\(app?.bundleIdentifier ?? "?")), focus \(focus.role) \(focus.subrole)")
         if arguments["irreversible"] as? Bool == true || Self.needsOK(key: key, flags: flags, app: app) {
             let what = arguments["what"] as? String
-            let title = "\(what.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Press \(keys)")\(app?.localizedName.map { " in \($0)" } ?? "")?"
+            let place = app?.localizedName.map { " in \($0)" } ?? ""
+            let summary = Self.summary(arguments)
+            let title = summary.map { "\($0)?" } ?? "\(what.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Press \(keys)")\(place)?"
             let request = ConfirmCard.Request(title: title, detail: focus.text.isEmpty ? nil : String(focus.text.prefix(200)),
-                                              action: Self.verb(for: [what ?? keys]))
-            guard await confirmKeepingFocus(request) else { return Self.refuse("The user said no, so nothing was pressed.") }
+                                              action: Self.verb(for: [summary ?? "", what ?? keys]),
+                                              note: summary == nil ? nil : "Presses \(keys)\(place)")
+            guard await confirmKeepingFocus(request) else { return declined("nothing was pressed") }
         }
 
         Self.post(key: key, flags: flags)
@@ -616,6 +629,11 @@ final class Hands {
         return words.contains { text.contains(" \($0) ") }
     }
 
+    private static func summary(_ arguments: [String: Any]) -> String? {
+        let text = (arguments["summary"] as? String ?? "").trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.init(charactersIn: "?.")))
+        return text.isEmpty ? nil : text
+    }
+
     private static func verb(for words: [String]) -> String {
         let text = words.joined(separator: " ").lowercased()
         for (word, verb) in [("run", "Run"), ("delete", "Delete"), ("remove", "Remove"), ("trash", "Delete"), ("buy", "Buy"), ("pay", "Pay"),
@@ -624,6 +642,10 @@ final class Hands {
             return verb
         }
         return "Continue"
+    }
+
+    private func declined(_ outcome: String) -> ToolServer.Result {
+        Self.refuse("The user \(confirmWentUnanswered() ? "didn't answer" : "said no"), so \(outcome).")
     }
 
     /// Shows the card, then puts the app you were in back in front, so the next key lands there.
