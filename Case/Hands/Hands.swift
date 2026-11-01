@@ -7,9 +7,11 @@ import Carbon.HIToolbox
 /// asks you first, passwords are never typed, and only web links can be opened.
 final class Hands {
     /// Shows the confirm card and waits for your answer.
-    var confirm: (ConfirmCard.Request) async -> Bool = { _ in false }
-    /// Whether the last question ran out of time, rather than the user saying no.
-    var confirmWentUnanswered: () -> Bool = { false }
+    var confirm: (ConfirmCard.Request) async -> ConfirmCard.Answer = { _ in .no }
+    /// Hands a job to a background task, passing the user's own words, and says how that went.
+    var startTask: (_ title: String, _ instructions: String, _ question: String) -> String = { _, _, _ in "" }
+    /// A background task saying it's finished, with what it made.
+    var onTaskDone: (_ summary: String, _ path: String?) -> Void = { _, _ in }
     /// Flies the buddy to a spot (AppKit coordinates) and taps it; returns once it has landed.
     var tap: (CGRect) async -> Void = { _ in }
     /// Runs something with Case's floating windows out of the way.
@@ -22,8 +24,11 @@ final class Hands {
     /// Starts, pauses, resumes or stops meeting notes, and says how that went.
     var meetingNotes: (String) -> String = { _ in "" }
 
-    /// Set by Esc: every further step is refused.
-    var isStopped = false
+    /// Set by Esc: every further step is refused, and anything still running stops.
+    var isStopped = false {
+        didSet { if isStopped { workspace.stopEverything() } }
+    }
+    private let workspace = Workspace()
     private(set) var actedThisTurn = false
     private(set) var looksThisTurn = 0
     /// Every step this turn, for the last-question log.
@@ -31,6 +36,10 @@ final class Hands {
 
     /// The user's own words this turn, which a message or page can't change.
     private var question = ""
+    /// Whether the last question ran out of time, rather than the user saying no.
+    private var lastWentUnanswered = false
+    /// A background task, whose only say on where things go is what the user actually said.
+    private var isTask = false
     private var screen: ScreenCapture.ScreenGeometry?
     private var elements: [ScreenElement] = []
     /// What the latest look saw this turn, since Claude's numbers now refer to it.
@@ -38,15 +47,20 @@ final class Hands {
     /// Numbers and positions only mean something for the screen Claude last saw.
     private var listIsCurrent = false
     private var steps = 0
+    private var workSteps = 0
 
     private static let maxSteps = 15
+    /// Making something takes many small steps, and stays inside the Case folder.
+    private static let maxWorkSteps = 80
+    private static let workTools: Set = ["write_file", "run_command", "check_command"]
     private static let escapeKey: CGKeyCode = 53
     /// When Case last pressed Esc itself.
     private static var pressedEscapeAt = ContinuousClock.now - .seconds(60)
     /// Esc anywhere means stop, but not the one Case just pressed as part of a task.
     static var justPressedEscape: Bool { ContinuousClock.now - pressedEscapeAt < .milliseconds(500) }
     /// These only read, so they don't count toward the limit or as doing something.
-    private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget", "meeting_notes"]
+    private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget",
+                                        "meeting_notes", "start_task", "finish_task"]
     /// Web addresses and links into apps. Nothing that can run a program or open a file.
     private static let linkSchemes: Set = ["http", "https", "whatsapp", "spotify", "notion", "slack", "zoommtg"]
     /// Opening these runs them, so a page or message can't talk Claude into it.
@@ -60,6 +74,7 @@ final class Hands {
         self.elements = elements
         listIsCurrent = true
         steps = 0
+        workSteps = 0
         actedThisTurn = false
         looksThisTurn = 0
         isStopped = false
@@ -67,9 +82,21 @@ final class Hands {
         lookedAt = nil
     }
 
+    /// A background task: no screen, and these are the user's own words, not Claude's retelling.
+    func newTask(question: String) {
+        self.question = question
+        isTask = true
+    }
+
     // MARK: Tools
 
-    static let tools: [ToolServer.Tool] = {
+    /// What runs at the cursor. Making things is always a background task, so the cursor stays free.
+    static var tools: [ToolServer.Tool] { allTools.filter { $0.name != "finish_task" && !workTools.contains($0.name) } }
+    /// A background task can't use the screen or mouse, and can't message anyone.
+    static var taskTools: [ToolServer.Tool] { allTools.filter { taskToolNames.contains($0.name) } }
+    private static let taskToolNames: Set = ["write_file", "run_command", "check_command", "find_files", "system_info", "finish_task"]
+
+    private static let allTools: [ToolServer.Tool] = {
         func schema(_ properties: [String: Any], required: [String] = []) -> [String: Any] {
             ["type": "object", "properties": properties, "required": required]
         }
@@ -121,6 +148,32 @@ final class Hands {
                       "to": ["type": "string", "description": "A contact's name, a number or email, or a group's name."],
                       "text": ["type": "string"], "status": status,
                   ], required: ["to", "text"])),
+            .init(name: "write_file", description: "Saves a text file. A plain path goes in the Case folder (~/Documents/Case). "
+                  + "A path outside that folder asks the user first.",
+                  schema: schema([
+                      "path": ["type": "string", "description": "Like \"sales report/notes.md\"."],
+                      "text": ["type": "string"], "status": status,
+                  ], required: ["path", "text"])),
+            .init(name: "run_command", description: "Runs a shell command in the Case folder (~/Documents/Case), with internet. It can only "
+                  + "change that folder, and can't control apps. If it's slow it keeps going, and you get a job number for check_command.",
+                  schema: schema([
+                      "command": ["type": "string"], "status": status,
+                      "outside": ["type": "boolean", "description": "True only if the user asked for something outside the Case folder. "
+                                  + "The app asks them first, then runs it with no limits."],
+                      "summary": summary,
+                  ], required: ["command"])),
+            .init(name: "start_task", description: "Starts a long job as a separate background task, so the user can keep asking you things.",
+                  schema: schema([
+                      "title": ["type": "string", "description": "Two or three words for its bar, like \"Population spreadsheet\"."],
+                      "instructions": ["type": "string", "description": "Everything it needs to know. It can't see this chat or the screen."],
+                  ], required: ["title", "instructions"])),
+            .init(name: "finish_task", description: "Call this last, when the task is done.",
+                  schema: schema([
+                      "summary": ["type": "string", "description": "One short sentence about what you made or found."],
+                      "path": ["type": "string", "description": "The main file you made, if there is one."],
+                  ], required: ["summary"])),
+            .init(name: "check_command", description: "Waits up to a minute for a job from run_command, then says how it's doing.",
+                  schema: schema(["job": ["type": "integer"], "status": status], required: ["job"])),
             .init(name: "remember", description: "Saves one fact about the user, with related details together, like \"Sam Lee, 30, birthday 2 June\". "
                   + "The user can see and delete it in Case's window.",
                   schema: schema(["fact": ["type": "string"]], required: ["fact"])),
@@ -185,8 +238,12 @@ final class Hands {
     func call(_ name: String, _ arguments: [String: Any]) async -> ToolServer.Result {
         guard !isStopped else { return Self.refuse("The user stopped this. Don't continue.") }
         // Looking is free; only actions count toward the limit.
-        if !Self.readOnly.contains(name) { steps += 1 }
-        guard steps <= Self.maxSteps else {
+        if Self.workTools.contains(name) {
+            workSteps += 1
+        } else if !Self.readOnly.contains(name) {
+            steps += 1
+        }
+        guard steps <= Self.maxSteps, workSteps <= Self.maxWorkSteps else {
             return Self.refuse("That's the most steps allowed for one request. Stop and tell the user what's left to do.")
         }
 
@@ -201,6 +258,14 @@ final class Hands {
         case "read_page": result = await readPage()
         case "read_messages": result = await readMessages(arguments)
         case "send_imessage": result = await sendMessage(arguments)
+        case "start_task":
+            result = ToolServer.Result(text: startTask(arguments["title"] as? String ?? "Task", arguments["instructions"] as? String ?? "", question))
+        case "finish_task":
+            onTaskDone(arguments["summary"] as? String ?? "", arguments["path"] as? String)
+            result = ToolServer.Result(text: "Done.")
+        case "write_file": result = await writeFile(arguments)
+        case "run_command": result = await runCommand(arguments)
+        case "check_command": result = await workspace.check(arguments["job"] as? Int ?? 0)
         case "browser_tabs":
             listIsCurrent = false
             result = await MacTools.chromeTabs(action: arguments["action"] as? String ?? "list", tabs: arguments["tabs"] as? [Int] ?? [])
@@ -296,6 +361,53 @@ final class Hands {
         case .failed(let text): return Self.refuse(text)
         case nil: return Self.refuse("That didn't work: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: Making things
+
+    /// Opens what a background task made, from its bar. Plain paths are in the Case folder.
+    func openResult(_ path: String) {
+        let place = workspace.place(path)
+        Task { _ = await openFile(place.url.path) }
+    }
+
+    private func writeFile(_ arguments: [String: Any]) async -> ToolServer.Result {
+        let path = arguments["path"] as? String ?? ""
+        guard !path.isEmpty else { return Self.refuse("Say where to save it.") }
+        let place = workspace.place(path)
+        if place.isOutside, isTask, !userNamed(place.url.deletingLastPathComponent()) {
+            return Self.refuse("The user didn't ask for it to go there. Save it in the Case folder, with a plain path.")
+        }
+        if place.isOutside {
+            let request = ConfirmCard.Request(title: "Save \(place.url.lastPathComponent)?", detail: nil, action: "Save",
+                                              note: "In \(place.url.deletingLastPathComponent().path), outside the Case folder")
+            guard await confirmKeepingFocus(request) else { return declined("it wasn't saved") }
+        }
+        do {
+            try workspace.save(arguments["text"] as? String ?? "", to: place)
+            return ToolServer.Result(text: "Saved \(place.url.path).")
+        } catch {
+            return Self.refuse("Couldn't save it: \(error.localizedDescription)")
+        }
+    }
+
+    /// Whether the user's own words mention this folder, like "on my desktop".
+    private func userNamed(_ folder: URL) -> Bool {
+        question.localizedCaseInsensitiveContains(folder.lastPathComponent)
+    }
+
+    private func runCommand(_ arguments: [String: Any]) async -> ToolServer.Result {
+        let command = arguments["command"] as? String ?? ""
+        guard !command.isEmpty else { return Self.refuse("There's no command to run.") }
+        let outside = arguments["outside"] as? Bool == true
+        if outside {
+            let title = Self.summary(arguments).map { "\($0)?" } ?? "Run this command?"
+            let request = ConfirmCard.Request(title: title, detail: String(command.prefix(200)), action: "Run",
+                                              note: "It can change anything on your Mac")
+            guard await confirmKeepingFocus(request) else { return declined("it wasn't run") }
+        }
+        guard !isStopped else { return Self.refuse("The user stopped this. Don't continue.") }
+        return await workspace.run(command, outside: outside)
     }
 
     // MARK: Open
@@ -634,26 +746,30 @@ final class Hands {
         return text.isEmpty ? nil : text
     }
 
+    /// The bar's main button, which is what turns it red. Every word that can trigger the bar needs
+    /// a verb here, or a purchase gets a plain Continue. Whole words, so "payload" isn't Pay.
     private static func verb(for words: [String]) -> String {
-        let text = words.joined(separator: " ").lowercased()
-        for (word, verb) in [("run", "Run"), ("delete", "Delete"), ("remove", "Remove"), ("trash", "Delete"), ("buy", "Buy"), ("pay", "Pay"),
-                             ("order", "Order"), ("submit", "Submit")]
-        where text.contains(word) {
+        for (word, verb) in [("delete", "Delete"), ("deleting", "Delete"), ("remove", "Remove"), ("removing", "Remove"), ("trash", "Delete"),
+                             ("erase", "Delete"), ("buy", "Buy"), ("purchase", "Buy"), ("checkout", "Buy"), ("check out", "Buy"),
+                             ("subscribe", "Buy"), ("pay", "Pay"), ("order", "Order"), ("place order", "Order"), ("run", "Run"),
+                             ("submit", "Submit")]
+        where contains([word], in: words) {
             return verb
         }
         return "Continue"
     }
 
     private func declined(_ outcome: String) -> ToolServer.Result {
-        Self.refuse("The user \(confirmWentUnanswered() ? "didn't answer" : "said no"), so \(outcome).")
+        Self.refuse("The user \(lastWentUnanswered ? "didn't answer" : "said no"), so \(outcome).")
     }
 
     /// Shows the card, then puts the app you were in back in front, so the next key lands there.
     private func confirmKeepingFocus(_ request: ConfirmCard.Request) async -> Bool {
         let app = NSWorkspace.shared.frontmostApplication
-        let confirmed = await confirm(request)
-        log.append("  confirm card \"\(request.title)\" → \(confirmed ? "yes" : "no")")
-        guard confirmed, !Task.isCancelled, !isStopped else { return false }
+        let answer = await confirm(request)
+        lastWentUnanswered = answer == .noAnswer
+        log.append("  confirm card \"\(request.title)\" → \(answer)")
+        guard answer == .yes, !Task.isCancelled, !isStopped else { return false }
         app?.activate()
         try? await Task.sleep(for: .milliseconds(200))
         return true

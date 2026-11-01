@@ -72,6 +72,11 @@ final class ToolServer {
         self.listener = listener
     }
 
+    func stop() {
+        listener?.cancel()
+        listener = nil
+    }
+
     /// Waits until the server has a port, so no Claude session starts without tools.
     func ready() async {
         if port != nil || failed || listener == nil { return }

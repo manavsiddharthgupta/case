@@ -6,6 +6,27 @@ import SwiftUI
 /// happens unless you answer yes: by button, by Enter, or by holding the hotkey and saying so.
 /// Enter only works after a moment, so a key you were already pressing can't answer it.
 final class ConfirmCard: NSPanel {
+    nonisolated enum Answer: Sendable {
+        case yes, no, noAnswer
+    }
+
+    private final class Question {
+        let id: UUID
+        let request: Request
+        let anchor: CGPoint
+        /// The background task it belongs to. Nil means the cursor, the only one Esc can cancel.
+        let owner: UUID?
+        let reply: CheckedContinuation<Answer, Never>
+
+        init(id: UUID, _ request: Request, anchor: CGPoint, owner: UUID?, reply: CheckedContinuation<Answer, Never>) {
+            self.id = id
+            self.request = request
+            self.anchor = anchor
+            self.owner = owner
+            self.reply = reply
+        }
+    }
+
     nonisolated struct Request: Sendable {
         /// "Delete 3 files from Downloads?"
         var title: String
@@ -15,14 +36,17 @@ final class ConfirmCard: NSPanel {
         var action: String
         /// What Case will actually do, like "Clicks Delete in Finder".
         var note: String?
+        /// The background task asking, when it isn't the one at the cursor.
+        var task: String?
 
-        var isDangerous: Bool { ["Delete", "Remove", "Buy", "Pay", "Order"].contains(action) }
+        var isDangerous: Bool { ["Delete", "Remove", "Buy", "Pay", "Order", "Run"].contains(action) }
 
         var symbol: String {
             switch action {
             case "Delete", "Remove": "trash"
             case "Buy", "Pay", "Order": "cart"
             case "Send": "paperplane"
+            case "Save": "square.and.arrow.down"
             case "Run": "terminal"
             default: "exclamationmark.circle"
             }
@@ -32,16 +56,17 @@ final class ConfirmCard: NSPanel {
     private static let width: CGFloat = 560
     private static let gapAboveDock: CGFloat = 16
     private static let smallestHeight: CGFloat = 80
+    private static let cornerRadius: CGFloat = 18
     private static let enterDelay = Duration.seconds(1)
 
     private let model = CardModel()
-    private var answer: CheckedContinuation<Bool, Never>?
+    private var current: Question?
+    /// One question at a time, so a new one can never answer the last one by replacing it.
+    private var waiting: [Question] = []
     private var timeout: Task<Void, Never>?
     private var arming: Task<Void, Never>?
 
-    var isAsking: Bool { answer != nil }
-    /// Whether the last question ran out of time, rather than being answered.
-    private(set) var wentUnanswered = false
+    var isAsking: Bool { current != nil }
 
     init() {
         super.init(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 96), styleMask: [.borderless, .nonactivatingPanel],
@@ -57,20 +82,53 @@ final class ConfirmCard: NSPanel {
 
     override var canBecomeKey: Bool { true }
 
-    /// Esc
+    /// Esc. A background task's question stays up: Esc only stops what's at the cursor.
     override func cancelOperation(_ sender: Any?) {
-        finish(false)
+        if current?.owner == nil { finish(.no) }
     }
 
-    /// Shows the bar on the screen holding `anchor` and waits for your answer. Cancelled (say,
-    /// Claude stopped waiting), it counts as no.
-    func ask(_ request: Request, near anchor: CGPoint) async -> Bool {
-        finish(false)
-        wentUnanswered = false
-        model.request = request
+    /// Asks on the screen holding `anchor`, once any question before it is answered, and waits.
+    /// Cancelled (say, Claude stopped waiting), it counts as no.
+    func ask(_ request: Request, near anchor: CGPoint, owner: UUID? = nil) async -> Answer {
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { reply in
+                waiting.append(Question(id: id, request, anchor: anchor, owner: owner, reply: reply))
+                showNext()
+            }
+        } onCancel: {
+            Task { @MainActor in self.remove { $0.id == id } }
+        }
+    }
+
+    /// Esc at the cursor: only the cursor's own questions.
+    func cancel() {
+        remove { $0.owner == nil }
+    }
+
+    /// A background task has stopped, so its questions no longer matter.
+    func cancel(owner: UUID) {
+        remove { $0.owner == owner }
+    }
+
+    private func remove(where matches: (Question) -> Bool) {
+        waiting.removeAll { question in
+            guard matches(question) else { return false }
+            question.reply.resume(returning: .no)
+            return true
+        }
+        if let current, matches(current) { finish(.no) }
+    }
+
+    private func showNext() {
+        guard current == nil, !waiting.isEmpty else { return }
+        let question = waiting.removeFirst()
+        current = question
+        model.request = question.request
         model.status = .waiting
         model.enterWorks = false
-        place(onScreenWith: anchor)
+        model.escapeCancels = question.owner == nil
+        place(onScreenWith: question.anchor)
         // Not key yet, so whatever you're typing stays in your app for now.
         orderFrontRegardless()
         arming = Task {
@@ -78,23 +136,13 @@ final class ConfirmCard: NSPanel {
             guard !Task.isCancelled else { return }
             model.enterWorks = true
             makeKey()
+            invalidateShadow()
         }
-        // Nobody answered for two minutes: treat it as no.
+        // Nobody answered for two minutes.
         timeout = Task {
             try? await Task.sleep(for: .seconds(120))
-            guard !Task.isCancelled else { return }
-            wentUnanswered = true
-            finish(false)
+            if !Task.isCancelled { finish(.noAnswer) }
         }
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { answer = $0 }
-        } onCancel: {
-            Task { @MainActor in self.finish(false) }
-        }
-    }
-
-    func cancel() {
-        finish(false)
     }
 
     func showListening() {
@@ -105,7 +153,7 @@ final class ConfirmCard: NSPanel {
     func answer(heard said: String) {
         guard isAsking else { return }
         if let meaning = Self.meaning(of: said) {
-            finish(meaning)
+            finish(meaning ? .yes : .no)
         } else {
             model.status = .didNotCatch
         }
@@ -119,29 +167,37 @@ final class ConfirmCard: NSPanel {
         return has(["yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "go ahead", "do it", "haan"]) ? true : nil
     }
 
-    private func finish(_ confirmed: Bool) {
+    private func finish(_ answer: Answer) {
         timeout?.cancel()
         arming?.cancel()
         orderOut(nil)
-        answer?.resume(returning: confirmed)
-        answer = nil
+        let question = current
+        current = nil
+        question?.reply.resume(returning: answer)
+        showNext()
     }
 
     private func place(onScreenWith anchor: CGPoint) {
         // A new view each time: an existing one can't measure content it hasn't drawn yet,
         // and a bar with no height is a question nobody can see.
-        let view = FirstClickHostingView(rootView: CardView(model: model) { [weak self] in self?.finish($0) })
+        let view = FirstClickHostingView(rootView: CardView(model: model) { [weak self] in self?.finish($0 ? .yes : .no) })
         view.sizingOptions = .intrinsicContentSize
+        // The glass can lose its shape once the bar takes the keyboard, so the window is cut to it too.
+        view.wantsLayer = true
+        view.layer?.cornerRadius = Self.cornerRadius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
         contentView = view
         let height = max(view.fittingSize.height, Self.smallestHeight)
         let visible = (NSScreen.screens.first { $0.frame.contains(anchor) } ?? NSScreen.main)?.visibleFrame ?? .zero
         setFrame(NSRect(x: visible.midX - Self.width / 2, y: visible.minY + Self.gapAboveDock, width: Self.width, height: height),
                  display: true)
+        invalidateShadow()
     }
 }
 
 /// So the first click on a button counts, even though the bar isn't the active window.
-private final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -152,6 +208,7 @@ private final class CardModel {
     var request: ConfirmCard.Request?
     var status = Status.waiting
     var enterWorks = false
+    var escapeCancels = true
 
     var hint: String {
         switch status {
@@ -175,6 +232,12 @@ private struct CardView: View {
                         .foregroundStyle(request.isDangerous ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
                         .frame(width: 26)
                     VStack(alignment: .leading, spacing: 3) {
+                        if let task = request.task {
+                            Text(task)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                         // Never cut short: this is what you're agreeing to.
                         Text(request.title)
                             .font(.system(size: 14, weight: .semibold))
@@ -197,7 +260,7 @@ private struct CardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
                     Button("Cancel") { onAnswer(false) }
-                        .keyboardShortcut(.cancelAction)
+                        .keyboardShortcut(model.escapeCancels ? .cancelAction : nil)
                     Button(model.enterWorks ? "\(request.action)  ⏎" : request.action) { onAnswer(true) }
                         .keyboardShortcut(model.enterWorks ? .defaultAction : nil)
                         .buttonStyle(AnswerButtonStyle(isDangerous: request.isDangerous))

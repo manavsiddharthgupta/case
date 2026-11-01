@@ -23,13 +23,19 @@ nonisolated enum FileSearch {
     private static let maxVisited = 40_000
     /// Anything this far below the best match is only getting in the way.
     private static let worstGap = 50
+    /// A match on the name itself, not on words inside the file.
+    private static let clearScore = 100
 
-    /// `query` can hold several spellings or names, separated by commas.
-    static func find(_ query: String, foldersOnly: Bool) async -> String {
-        let spellings = query.split(separator: ",").map { tokens(String($0)) }.filter { !$0.isEmpty }
-        guard !spellings.isEmpty else { return "Give some words from the name to search for." }
+    /// The file whose name clearly matches, if there is one, and how many others also came up.
+    static func clearMatch(_ query: String) async -> (path: String, others: Int)? {
+        let spellings = [tokens(query)].filter { !$0.isEmpty }
+        guard !spellings.isEmpty else { return nil }
+        let (useful, _) = await search(spellings, foldersOnly: false, home: NSHomeDirectory())
+        guard let best = useful.first, best.score >= clearScore, !best.inside else { return nil }
+        return (best.path, useful.count - 1)
+    }
 
-        let home = NSHomeDirectory()
+    private static func search(_ spellings: [[String]], foldersOnly: Bool, home: String) async -> (useful: [Match], blocked: [String]) {
         async let read = walk(foldersOnly: foldersOnly, home: home)
         let found = await spotlight(spellings, foldersOnly: foldersOnly)
         let (walked, blocked) = await read
@@ -47,6 +53,16 @@ nonisolated enum FileSearch {
 
         let best = matches.map(\.score).max() ?? 0
         let useful = matches.filter { $0.score >= best - worstGap }.sorted { ($0.score, $1.path) > ($1.score, $0.path) }
+        return (useful, blocked)
+    }
+
+    /// `query` can hold several spellings or names, separated by commas.
+    static func find(_ query: String, foldersOnly: Bool) async -> String {
+        let spellings = query.split(separator: ",").map { tokens(String($0)) }.filter { !$0.isEmpty }
+        guard !spellings.isEmpty else { return "Give some words from the name to search for." }
+
+        let home = NSHomeDirectory()
+        let (useful, blocked) = await search(spellings, foldersOnly: foldersOnly, home: home)
         let shown = useful.prefix(maxShown).map { match in
             let path = match.path.hasPrefix(home) ? "~" + match.path.dropFirst(home.count) : match.path
             return match.inside ? "\(path) (the words are inside it)" : path

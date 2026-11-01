@@ -60,6 +60,9 @@ final class Assistant {
     @ObservationIgnored private let toolServer = ToolServer()
     @ObservationIgnored private let hands = Hands()
     @ObservationIgnored private let confirmCard = ConfirmCard()
+    /// Long jobs running beside you, each with its own bar and its own Claude.
+    @ObservationIgnored private let tasks = TaskManager()
+    @ObservationIgnored private lazy var taskBar = TaskBar(tasks: tasks)
     /// The hotkey is held to answer the confirm bar.
     @ObservationIgnored private var answeringCard = false
     @ObservationIgnored private var history: [(question: String, answer: String)] = []
@@ -99,14 +102,30 @@ final class Assistant {
         toolServer.tools = Hands.tools
         toolServer.call = { [hands] name, arguments in await hands.call(name, arguments) }
         hands.confirm = { [weak self] request in
-            guard let self else { return false }
+            guard let self else { return .no }
             if !windowTurn {
                 speaker.stop()
                 speaker.sayIfIdle(request.title)
             }
             return await confirmCard.ask(request, near: pointer.anchor)
         }
-        hands.confirmWentUnanswered = { [weak self] in self?.confirmCard.wentUnanswered ?? false }
+        hands.startTask = { [weak self] title, instructions, question in
+            guard let self else { return "" }
+            return tasks.start(title: title, instructions: instructions, question: question, chat: currentChat)
+        }
+        // A task's question must not cut off what's being said at the cursor.
+        tasks.confirm = { [weak self] request, owner in
+            guard let self else { return .no }
+            announce(request.title)
+            return await confirmCard.ask(request, near: NSEvent.mouseLocation, owner: owner)
+        }
+        tasks.onStop = { [weak self] owner in self?.confirmCard.cancel(owner: owner) }
+        tasks.onChange = { [weak self] in self?.taskBar.refresh() }
+        tasks.onFinish = { [weak self] item, chat in
+            guard let self else { return }
+            if !isBusy, !windowTurn { announce("\(item.title) is ready.") }
+            if let chat, case .done(let summary, _) = item.state { chats.add(question: "Task: \(item.title)", answer: summary, to: chat) }
+        }
         hands.tap = { [weak self] rect in await self?.pointer.tap(at: rect) }
         // Like a person working beside you: each step shows in the caption, and is said out loud
         // unless the last one is still being said.
@@ -381,9 +400,10 @@ final class Assistant {
         let picked = inWindow ? nil : selection
         selection = nil
         if turnsInSession >= Self.turnsPerSession || imagesInSession >= Self.imagesPerSession { switchSession() }
-        if controlMeeting(text, chat: chat) || openDirectly(text, chat: chat) || closeDirectly(text, chat: chat) { return }
+        if controlTask(text, chat: chat) || controlMeeting(text, chat: chat) || openDirectly(text, chat: chat) || closeDirectly(text, chat: chat) { return }
 
         Task {
+            if await findDirectly(text, chat: chat) { return }
             do {
                 let screen = try ScreenCapture.screenUnderCursor()
                 let shot: ScreenCapture.Shot?
@@ -595,6 +615,14 @@ final class Assistant {
 
     /// The answer bubble stays while Aman reads it, then a moment longer. Muted, it stays
     /// long enough to read: about 4 seconds plus a bit per word.
+    /// A line from a background task. Outside a question nothing else clears the caption, so this does.
+    private func announce(_ line: String) {
+        let canSpeak = !speaker.isMuted && !speaker.isSpeaking
+        speaker.sayIfIdle(line)
+        guard canSpeak, !isBusy else { return }
+        speaker.whenDone { [weak self] in self?.pointer.fadeCaption(after: .seconds(2.5)) }
+    }
+
     private func scheduleCaptionFade() {
         if speaker.isMuted {
             let words = Double(answer.split(separator: " ").count)
@@ -651,6 +679,15 @@ final class Assistant {
 
     /// Moves to a fresh Claude session, carrying a short text recap (no screenshots) of the last few turns.
     /// "Pause the notes", "stop transcribing", "resume recording": no thinking needed.
+    /// "Stop the spreadsheet": no trip to Claude, and it has to come before the meeting phrases.
+    private func controlTask(_ text: String, chat: UUID) -> Bool {
+        let pattern = #/^(?:please\s+)?(?:stop|cancel|end)\s+(?:(?:the|my|this|that)\s+)?(?<name>[\w .'-]+?)[.!]?$/#.ignoresCase()
+        guard let match = text.wholeMatch(of: pattern), let stopped = tasks.stop(named: String(match.output.name)) else { return false }
+        phase = .ready
+        replyDirectly("Stopped \(stopped).", to: text, chat: chat, showFor: .seconds(2.5))
+        return true
+    }
+
     private func controlMeeting(_ text: String, chat: UUID) -> Bool {
         let pattern = #/^(?:please\s+)?(?<verb>start|begin|pause|resume|continue|stop|end|finish)\s+(?:(?:the|my|this)\s+)?(?<what>meeting notes|meeting|taking notes|notes|transcribing|transcription|transcript|recording)(?:\s+please)?[.!]?$/#.ignoresCase()
         guard let match = text.wholeMatch(of: pattern) else { return false }
@@ -663,6 +700,24 @@ final class Assistant {
     }
 
     /// "Open Spotify" needs no thinking: open it straight away.
+    /// "Find my passport": a clear match shows in Finder at once, with no trip to Claude.
+    /// Anything less certain goes to Claude as usual.
+    private func findDirectly(_ text: String, chat: UUID) async -> Bool {
+        guard let name = Self.fileToFind(in: text), let match = await FileSearch.clearMatch(name) else { return false }
+        let url = URL(fileURLWithPath: match.path)
+        phase = .ready
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        let others = match.others > 0 ? " There \(match.others == 1 ? "is 1 other" : "are \(match.others) others")." : ""
+        replyDirectly("Found \(url.lastPathComponent).\(others)", to: text, chat: chat, showFor: .seconds(3))
+        return true
+    }
+
+    /// Only "my", so "find a good restaurant" stays a question for Claude.
+    nonisolated static func fileToFind(in text: String) -> String? {
+        let pattern = #/^(?:please\s+)?(?:find|locate|where(?:'s|\s+is))\s+my\s+(?<name>[\w .'-]+?)(?:\s+(?:file|document|pdf))?[.!?]?$/#.ignoresCase()
+        return text.wholeMatch(of: pattern).map { String($0.output.name) }
+    }
+
     private func openDirectly(_ text: String, chat: UUID) -> Bool {
         let pattern = #/^(?:please\s+)?(?:open|launch|start)\s+(?:the\s+)?(?<name>[\w .'-]+?)(?:\s+app)?[.!]?$/#.ignoresCase()
         guard let match = text.wholeMatch(of: pattern), let url = Hands.findApp(named: String(match.output.name)) else {
