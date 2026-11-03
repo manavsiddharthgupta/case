@@ -58,11 +58,13 @@ enum ScreenCapture {
 
     enum CaptureError: LocalizedError {
         case noDisplay
+        case noWindow
         case encodingFailed
 
         var errorDescription: String? {
             switch self {
             case .noDisplay: "Couldn't find the screen under your mouse."
+            case .noWindow: "That app has no window open to capture."
             case .encodingFailed: "Couldn't prepare the screenshot."
             }
         }
@@ -90,6 +92,43 @@ enum ScreenCapture {
     /// Captures that screen without Case's own windows.
     static func capture(_ screen: ScreenGeometry) async throws -> Shot {
         Shot(jpeg: try await capture(displayID: screen.displayID, pixelSize: screen.pixelSize), screen: screen)
+    }
+
+    /// A picture of one app's main window at full resolution, even when other windows cover it,
+    /// so something opened in the background can be shown without bringing it forward.
+    @concurrent
+    nonisolated static func window(of pid: pid_t) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        // Its biggest normal window: the one you'd call "the window", not a toolbar or popover.
+        guard let window = content.windows
+            .filter({ $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width > 100 && $0.frame.height > 100 })
+            .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+        else { throw CaptureError.noWindow }
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = fullSize(filter)
+        config.ignoreShadowsSingleWindow = true
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
+    /// The whole screen under the mouse at full resolution, without Case's own windows.
+    @concurrent
+    nonisolated static func fullScreen(_ screen: ScreenGeometry) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else { throw CaptureError.noDisplay }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { $0.processID == ownPID },
+                                     exceptingWindows: [])
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: fullSize(filter))
+    }
+
+    /// Exactly the size of what's captured, in real pixels, as macOS measures it. Working it out from
+    /// the window's frame and the screen's scale can come out bigger, leaving a blank edge.
+    private nonisolated static func fullSize(_ filter: SCContentFilter) -> SCStreamConfiguration {
+        let config = SCStreamConfiguration()
+        config.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+        config.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
+        config.showsCursor = false
+        return config
     }
 
     @concurrent

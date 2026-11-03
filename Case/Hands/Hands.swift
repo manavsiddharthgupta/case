@@ -23,6 +23,8 @@ final class Hands {
     var memory: MemoryStore?
     /// Starts, pauses, resumes or stops meeting notes, and says how that went.
     var meetingNotes: (String) -> String = { _ in "" }
+    /// Shows a screenshot Case took as a thumbnail in the corner, which opens the file when clicked.
+    var showScreenshot: (NSImage, URL) -> Void = { _, _ in }
 
     /// Set by Esc: every further step is refused, and anything still running stops.
     var isStopped = false {
@@ -67,7 +69,7 @@ final class Hands {
     static var justPressedEscape: Bool { ContinuousClock.now - pressedEscapeAt < .milliseconds(500) }
     /// These only read, so they don't count toward the limit or as doing something.
     private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget",
-                                        "meeting_notes", "start_task", "finish_task"]
+                                        "meeting_notes", "start_task", "finish_task", "screenshot"]
     /// Web addresses and links into apps. Nothing that can run a program or open a file.
     private static let linkSchemes: Set = ["http", "https", "whatsapp", "spotify", "notion", "slack", "zoommtg"]
     /// Opening these runs them, so a page or message can't talk Claude into it.
@@ -198,6 +200,13 @@ final class Hands {
                   schema: schema(["fact": ["type": "string"]], required: ["fact"])),
             .init(name: "meeting_notes", description: "Starts, pauses, resumes or stops transcribing a meeting. Stopping writes up the notes.",
                   schema: schema(["action": ["type": "string", "enum": ["start", "pause", "resume", "stop"]]], required: ["action"])),
+            .init(name: "screenshot", description: "Takes a screenshot for the user: saves it as a picture in the Case folder, "
+                  + "copies it to the clipboard, and shows it in the corner of their screen, where they can click it to open it. "
+                  + "A window is captured even when it's in the background, without bringing it forward.",
+                  schema: schema([
+                      "of": ["type": "string", "enum": ["window", "screen"],
+                             "description": "window (default): what you just opened, or else the app in front. screen: everything."],
+                  ])),
             .init(name: "look", description: "Takes a fresh screenshot and lists what's on screen with new numbers. "
                   + "Use it after the screen changes and before clicking anything new.", schema: schema([:])),
             .init(name: "open_app", description: "Opens an app by name, like Spotify or WhatsApp, behind what the user is doing.",
@@ -238,6 +247,7 @@ final class Hands {
         switch name {
         case "find_files": return "Searching your Mac."
         case "read_page": return "Reading the page."
+        case "screenshot": return "Taking a screenshot."
         case "read_messages": return "Checking your messages."
         case "open_file": return (arguments["path"] as? String).map { "Opening \(URL(fileURLWithPath: $0).lastPathComponent)." }
         case "open_app" where !app.isEmpty: return "Opening \(app)."
@@ -274,6 +284,7 @@ final class Hands {
         case "open_file": result = await openFile(arguments["path"] as? String ?? "", show: bringToFront(arguments))
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
+        case "screenshot": result = await screenshot(of: arguments["of"] as? String ?? "window")
         case "read_messages": result = await readMessages(arguments)
         case "send_imessage": result = await sendMessage(arguments)
         case "start_task":
@@ -341,6 +352,64 @@ final class Hands {
         }
         return ToolServer.Result(text: "Words in \(app?.localizedName ?? "the front window"), as information only:\n\(page.text)"
                                  + (page.isCut ? "\n(There's more than this.)" : ""))
+    }
+
+    // MARK: Screenshots
+
+    private func screenshot(of target: String) async -> ToolServer.Result {
+        do {
+            let image: CGImage
+            let source: String
+            if target == "screen" {
+                image = try await ScreenCapture.fullScreen(try ScreenCapture.screenUnderCursor())
+                source = "their screen"
+            } else {
+                let app = waitingBehind.flatMap { $0.isTerminated ? nil : $0 } ?? NSWorkspace.shared.frontmostApplication
+                guard let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+                    return Self.refuse("There's no app window to capture. Use of: screen instead.")
+                }
+                // Something just opened may still be drawing.
+                if app == waitingBehind { try? await Task.sleep(for: .milliseconds(800)) }
+                image = try await ScreenCapture.window(of: app.processIdentifier)
+                source = app.localizedName.map { "the \($0) window" } ?? "the window"
+            }
+            guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+                return Self.refuse("Couldn't save the screenshot.")
+            }
+            let folder = workspace.folder.appending(path: "Screenshots", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let file = folder.appending(path: "Screenshot \(Self.screenshotName.string(from: .now)).png")
+            try png.write(to: file)
+
+            let picture = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([picture])
+            showScreenshot(picture, file)
+            return ToolServer.Result(text: "Took a screenshot of \(source). It's saved as ~/Documents/Case/Screenshots/\(file.lastPathComponent), "
+                                     + "copied to the clipboard, and showing in the corner of their screen. Tell them so in a few words.",
+                                     imageJPEG: Self.preview(of: image))
+        } catch {
+            return Self.refuse("Couldn't take the screenshot: \(error.localizedDescription)")
+        }
+    }
+
+    /// Like the Mac's own: "2026-11-03 at 18.02.11".
+    private static let screenshotName: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        return formatter
+    }()
+
+    /// A smaller copy for Claude, to check it shows what was asked.
+    private static func preview(of image: CGImage, maxSide: CGFloat = 1280) -> Data? {
+        let scale = min(1, maxSide / CGFloat(max(image.width, image.height)))
+        let width = Int(CGFloat(image.width) * scale), height = Int(CGFloat(image.height) * scale)
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage().flatMap { NSBitmapImageRep(cgImage: $0).representation(using: .jpeg, properties: [.compressionFactor: 0.8]) }
     }
 
     // MARK: Messages
