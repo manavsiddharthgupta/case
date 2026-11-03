@@ -161,7 +161,7 @@ private struct Replied: View {
     var faint = false
 
     var body: some View {
-        Text(text)
+        FormattedText(text: text)
             .font(Theme.font(15))
             .lineSpacing(4)
             .foregroundStyle(faint ? Theme.muted : Theme.foreground)
