@@ -7,12 +7,14 @@ struct CaseApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
+        // Clicking the icon opens Home; everything that was in its menu is under Home's •••.
         MenuBarExtra {
-            MenuView()
+            HomeView { NSApp.keyWindow?.close() }
                 .environment(model)
         } label: {
             MenuBarLabel(model: model, appDelegate: appDelegate)
         }
+        .menuBarExtraStyle(.window)
 
         Window("Case", id: "main") {
             MainWindow()

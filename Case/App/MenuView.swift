@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// The menu under the ✦ icon in the menu bar.
+/// Home's ••• menu: everything that isn't one of its main actions.
 struct MenuView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(model.claude.summary)
@@ -15,7 +14,6 @@ struct MenuView: View {
         Divider()
 
         Button("Open Case") { open(.chats) }
-        Button("Show Home") { model.home.show() }
         if model.recorder.isCapturing {
             if model.recorder.phase == .paused {
                 Button("Resume meeting notes") { Task { await model.recorder.resume() } }
@@ -61,10 +59,7 @@ struct MenuView: View {
 
         Divider()
 
-        Button("Setup…") {
-            NSApp.activate()
-            openWindow(id: "setup")
-        }
+        Button("Setup…") { model.openWindow("setup") }
         Button("Check for Updates…") { model.checkForUpdates() }
 
         Divider()
@@ -75,8 +70,7 @@ struct MenuView: View {
 
     private func open(_ page: AppModel.Page) {
         model.page = page
-        NSApp.activate()
-        openWindow(id: "main")
+        model.openWindow("main")
     }
 }
 

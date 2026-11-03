@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// A small panel that drops from the top middle of the screen, out of the notch on Macs that have
-/// one: a greeting, how to ask, and what Case can reach. Rest the mouse at the top middle to open it,
-/// or choose Home in the menu. It goes away when the mouse leaves, or on a click elsewhere or Esc.
+/// Home dropping out of the notch: the same view as under the ✦ icon, in black so it blends with
+/// the notch. Rest the mouse at the top middle of the screen to open it. It goes away when the
+/// mouse leaves, or on a click elsewhere, Esc or the hotkey.
 final class HomePanel: NSPanel {
-    private static let size = CGSize(width: 540, height: 176)
     /// The strip at the top middle of the screen that opens it.
     private static let zoneWidth: CGFloat = 240
     private static let zoneHeight: CGFloat = 6
@@ -16,13 +15,11 @@ final class HomePanel: NSPanel {
     private var monitors: [Any] = []
     private var opening: Task<Void, Never>?
     private var leaving: Task<Void, Never>?
-    /// Opened by resting the mouse at the top, so it also closes when the mouse moves away.
-    private var openedByHover = false
 
     init(model: AppModel) {
         self.model = model
-        super.init(contentRect: NSRect(origin: .zero, size: Self.size), styleMask: [.borderless, .nonactivatingPanel],
-                   backing: .buffered, defer: false)
+        super.init(contentRect: NSRect(x: 0, y: 0, width: HomeView.width, height: 120),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         // Over the menu bar, so it reads as coming out of the notch.
         level = .popUpMenu
@@ -48,17 +45,36 @@ final class HomePanel: NSPanel {
         ].compactMap { $0 }
     }
 
-    func show(byHover: Bool = false) {
+    func hide() {
         opening?.cancel()
         leaving?.cancel()
-        openedByHover = byHover
-        guard !isVisible, let screen = Self.screenUnderMouse else { return }
-        contentView = FirstClickHostingView(rootView: HomeView(model: model, close: { [weak self] in self?.hide() }))
-        let top = screen.frame.maxY
-        let frame = NSRect(x: screen.frame.midX - Self.size.width / 2, y: top - Self.size.height,
-                           width: Self.size.width, height: Self.size.height)
+        leaving = nil
+        guard isVisible else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                // Shown again while fading out.
+                guard let self, self.alphaValue == 0 else { return }
+                self.orderOut(nil)
+                self.contentView = nil
+            }
+        }
+    }
+
+    private func show(on screen: NSScreen) {
+        // The menu bar's height, which on a Mac with a notch is the notch's.
+        let menuBar = max(screen.frame.maxY - screen.visibleFrame.maxY, screen.safeAreaInsets.top, 24)
+        let view = FirstClickHostingView(rootView: HomeView(inNotch: true, topInset: menuBar) { [weak self] in self?.hide() }
+            .environment(model))
+        view.sizingOptions = .intrinsicContentSize
+        contentView = view
+        let size = view.fittingSize
+        let frame = NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height,
+                           width: size.width, height: size.height)
         // Slides down from behind the menu bar.
-        setFrame(frame.offsetBy(dx: 0, dy: 24), display: true)
+        setFrame(frame.offsetBy(dx: 0, dy: 20), display: true)
         alphaValue = 0
         orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { context in
@@ -66,21 +82,6 @@ final class HomePanel: NSPanel {
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().setFrame(frame, display: true)
             animator().alphaValue = 1
-        }
-    }
-
-    func hide() {
-        opening?.cancel()
-        leaving?.cancel()
-        guard isVisible else { return }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            animator().alphaValue = 0
-        } completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                self?.orderOut(nil)
-                self?.contentView = nil
-            }
         }
     }
 
@@ -99,26 +100,24 @@ final class HomePanel: NSPanel {
 
     private func mouseMoved() {
         let mouse = NSEvent.mouseLocation
-        if isVisible {
-            guard openedByHover else { return }
-            if frame.insetBy(dx: -16, dy: -16).contains(mouse) || Self.isInZone(mouse) {
+        if isVisible, alphaValue > 0 {
+            if frame.insetBy(dx: -16, dy: -16).contains(mouse) || Self.zone(containing: mouse) != nil {
                 leaving?.cancel()
                 leaving = nil
             } else if leaving == nil {
                 leaving = Task { [weak self] in
                     try? await Task.sleep(for: Self.leaveAfter)
                     guard !Task.isCancelled else { return }
-                    self?.leaving = nil
                     self?.hide()
                 }
             }
-        } else if Self.isInZone(mouse) {
+        } else if Self.zone(containing: mouse) != nil {
             guard opening == nil else { return }
             opening = Task { [weak self] in
                 try? await Task.sleep(for: Self.dwell)
                 self?.opening = nil
-                guard !Task.isCancelled, Self.isInZone(NSEvent.mouseLocation) else { return }
-                self?.show(byHover: true)
+                guard !Task.isCancelled, let screen = Self.zone(containing: NSEvent.mouseLocation) else { return }
+                self?.show(on: screen)
             }
         } else {
             opening?.cancel()
@@ -126,81 +125,116 @@ final class HomePanel: NSPanel {
         }
     }
 
-    private static var screenUnderMouse: NSScreen? {
-        let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-    }
-
-    /// The very top of the screen, around the middle: the notch, or where it would be.
-    private static func isInZone(_ mouse: CGPoint) -> Bool {
-        guard let screen = screenUnderMouse else { return false }
-        return mouse.y >= screen.frame.maxY - zoneHeight && abs(mouse.x - screen.frame.midX) <= zoneWidth / 2
+    /// The screen whose top middle, the notch or where it would be, the mouse is resting in.
+    private static func zone(containing mouse: CGPoint) -> NSScreen? {
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
+              mouse.y >= screen.frame.maxY - zoneHeight, abs(mouse.x - screen.frame.midX) <= zoneWidth / 2 else { return nil }
+        return screen
     }
 }
 
-private struct HomeView: View {
-    let model: AppModel
+/// Home: a greeting, how to ask, and the things you do most. Shown under the ✦ icon and out of the notch.
+struct HomeView: View {
+    static let width: CGFloat = 380
+
+    @Environment(AppModel.self) private var model
+    /// In the notch it's always black, to blend in; under the icon it follows light or dark mode.
+    var inNotch = false
+    /// Room for the menu bar the notch panel drops from behind.
+    var topInset: CGFloat = 0
     let close: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("⌥⌘")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.horizontal, 10)
-                    .frame(height: 24)
-                    .background(.white.opacity(0.1), in: .capsule)
-                Spacer()
-                IconButton(symbol: "gearshape", help: "Setup") {
-                    close()
-                    model.openWindow("setup")
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                MarkView(active: model.assistant.isBusy || model.recorder.isCapturing, size: 30)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(greeting)
+                        .font(Theme.font(19, weight: .medium))
+                        .tracking(-0.4)
+                    hint
                 }
+                Spacer(minLength: 0)
+                Menu {
+                    MenuView()
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 28, height: 28)
+                        .contentShape(.circle)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .foregroundStyle(muted)
+                .fixedSize()
+                .help("More")
             }
 
-            Spacer(minLength: 0)
-
-            Text(greeting)
-                .font(Theme.font(24, weight: .medium))
-                .tracking(-0.6)
-            Text(hint)
-                .font(Theme.font(14))
-                .foregroundStyle(.white.opacity(0.6))
-                .padding(.top, 4)
-
-            Spacer(minLength: 0)
-
-            HStack {
-                Button {
+            HStack(spacing: 8) {
+                Action(title: "Ask", symbol: "text.cursor", inNotch: inNotch) {
+                    close()
+                    model.assistant.openTyping()
+                }
+                meetingAction
+                Action(title: "Open Case", symbol: "macwindow", inNotch: inNotch) {
                     close()
                     model.page = .chats
                     model.openWindow("main")
-                } label: {
-                    Label("Open Case", systemImage: "macwindow")
-                        .font(Theme.font(12, weight: .medium))
-                        .padding(.horizontal, 12)
-                        .frame(height: 28)
-                        .background(.white.opacity(0.1), in: .capsule)
-                        .contentShape(.capsule)
                 }
-                .buttonStyle(.plain)
-                Spacer()
-                Reach()
             }
         }
-        .foregroundStyle(.white)
         .padding(.horizontal, 18)
-        // Clear of the menu bar it drops from.
-        .padding(.top, 34)
-        .padding(.bottom, 14)
-        .frame(width: 540, height: 176)
-        .background(.black, in: UnevenRoundedRectangle(bottomLeadingRadius: 26, bottomTrailingRadius: 26))
-        .environment(\.colorScheme, .dark)
+        .padding(.top, 16 + topInset)
+        .padding(.bottom, 16)
+        .frame(width: Self.width)
+        .foregroundStyle(inNotch ? Color.white : Theme.foreground)
+        .background {
+            if inNotch {
+                UnevenRoundedRectangle(bottomLeadingRadius: 22, bottomTrailingRadius: 22).fill(.black)
+            }
+        }
+        .environment(\.colorScheme, inNotch ? .dark : colorScheme)
+    }
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var muted: Color { inNotch ? .white.opacity(0.55) : Theme.muted }
+
+    @ViewBuilder private var meetingAction: some View {
+        if model.recorder.isCapturing {
+            Action(title: "Stop notes", symbol: "stop.fill", inNotch: inNotch, live: true) {
+                Task { await model.recorder.stop() }
+            }
+        } else {
+            Action(title: "Meeting notes", symbol: "waveform", inNotch: inNotch) {
+                close()
+                Task { await model.recorder.start() }
+            }
+            .disabled(model.recorder.isActive)
+        }
+    }
+
+    /// How to ask, or what's wrong if Case can't answer right now.
+    @ViewBuilder private var hint: some View {
+        if case .connected = model.claude, model.permissions.allGranted {
+            HStack(spacing: 4) {
+                Text("Hold")
+                Keycap("⌥", inNotch: inNotch)
+                Keycap("⌘", inNotch: inNotch)
+                Text("to talk, tap to type")
+            }
+            .font(Theme.font(13))
+            .foregroundStyle(muted)
+        } else {
+            Text(model.permissions.allGranted ? model.claude.summary : "Some permissions are missing. Open Setup from •••.")
+                .font(Theme.font(13))
+                .foregroundStyle(.orange)
+        }
     }
 
     private var greeting: String {
-        let hour = Calendar.current.component(.hour, from: .now)
-        let part = switch hour {
+        let part = switch Calendar.current.component(.hour, from: .now) {
         case 5..<12: "Morning"
         case 12..<17: "Afternoon"
         case 17..<23: "Evening"
@@ -209,52 +243,64 @@ private struct HomeView: View {
         let name = NSFullUserName().split(separator: " ").first.map(String.init) ?? ""
         return name.isEmpty ? "\(part)." : "\(part), \(name)."
     }
-
-    /// How to ask, or what's wrong if Case can't answer right now.
-    private var hint: String {
-        if case .connected = model.claude {
-            return model.permissions.allGranted
-                ? "Hold ⌥⌘ and tell me what to take off your plate."
-                : "Some permissions are missing. Open Setup to finish."
-        }
-        return model.claude.summary
-    }
 }
 
-/// What Case can reach on this Mac, as small icons with their names on hover.
-private struct Reach: View {
-    private static let items = [
-        ("message", "iMessage"), ("globe", "Chrome tabs"), ("folder", "Files"), ("waveform", "Meeting notes"), ("brain", "Memory"),
-    ]
+private struct Keycap: View {
+    let key: String
+    let inNotch: Bool
+
+    init(_ key: String, inNotch: Bool) {
+        self.key = key
+        self.inNotch = inNotch
+    }
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(Self.items, id: \.1) { symbol, name in
-                Image(systemName: symbol)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .frame(width: 26, height: 26)
-                    .background(.white.opacity(0.1), in: .circle)
-                    .help(name)
-            }
-        }
+        Text(key)
+            .font(.system(size: 11, weight: .medium))
+            .frame(minWidth: 20, minHeight: 18)
+            .background(inNotch ? Color.white.opacity(0.12) : Theme.pill, in: .rect(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(inNotch ? Color.white.opacity(0.15) : Theme.border))
     }
 }
 
-private struct IconButton: View {
+/// One of the things you do most, as a wide rounded button.
+private struct Action: View {
+    let title: String
     let symbol: String
-    let help: String
+    let inNotch: Bool
+    var live = false
     let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 26, height: 26)
-                .contentShape(.circle)
+            VStack(spacing: 6) {
+                if live {
+                    RecordingDot()
+                        .frame(height: 16)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 14))
+                        .frame(height: 16)
+                }
+                Text(title)
+                    .font(Theme.font(12, weight: .medium))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(background, in: .rect(cornerRadius: 12))
+            .contentShape(.rect(cornerRadius: 12))
+            .opacity(isEnabled ? 1 : 0.4)
         }
         .buttonStyle(.plain)
-        .help(help)
+        .onHover { hovering = $0 }
+    }
+
+    private var background: Color {
+        if inNotch { return .white.opacity(hovering ? 0.16 : 0.09) }
+        return hovering ? Theme.ghost.opacity(0.5) : Theme.pill
     }
 }
