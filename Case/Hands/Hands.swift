@@ -52,6 +52,9 @@ final class Hands {
     private var workSteps = 0
     /// Opened behind the user's work this turn. It comes forward only when a step needs the screen.
     private var waitingBehind: NSRunningApplication?
+    /// The app the user was in when they asked, to go back to if a step had to bring another forward.
+    private var returnTo: NSRunningApplication?
+    private var broughtForward = false
 
     private static let maxSteps = 15
     /// These work through the screen, so whatever was opened in the background comes forward first.
@@ -87,6 +90,8 @@ final class Hands {
         log = []
         lookedAt = nil
         waitingBehind = nil
+        returnTo = NSWorkspace.shared.frontmostApplication
+        broughtForward = false
     }
 
     /// A background task: no screen, and these are the user's own words, not Claude's retelling.
@@ -544,21 +549,40 @@ final class Hands {
     /// they're asked. If that happens, the app you were in goes back in front once it has finished.
     /// Activating another app from the background is ignored by macOS, so this goes through Launch Services.
     private func keepInFront(_ previous: NSRunningApplication?, over opened: NSRunningApplication) async {
-        guard let previous, previous != opened, let bundle = previous.bundleURL else { return }
+        guard let previous, previous != opened else { return }
         func openedIsInFront() -> Bool { NSWorkspace.shared.frontmostApplication == opened }
         for _ in 0..<15 where !openedIsInFront() {
             try? await Task.sleep(for: .milliseconds(100))
         }
         guard openedIsInFront() else { return }
+        let name = opened.localizedName ?? "it"
+        // Sent while it's still coming forward, it loses, so it waits for that to finish first.
+        let back = await reopen(previous, after: .milliseconds(400))
+        log.append("  \(name) came to the front by itself; \(previous.localizedName ?? "the user's app") \(back ? "is back in front" : "couldn't be put back")")
+    }
+
+    /// Puts an app back in front. macOS ignores activate() from an app in the background, so this goes
+    /// through Launch Services, which also works for Case itself. True once it's in front.
+    private func reopen(_ app: NSRunningApplication, after wait: Duration) async -> Bool {
+        guard !app.isTerminated, let bundle = app.bundleURL else { return false }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        // Sent while it's still coming forward, it loses, so it waits for that to finish first.
-        for wait in [400, 600] {
-            try? await Task.sleep(for: .milliseconds(wait))
+        for delay in [wait, .milliseconds(600)] {
+            try? await Task.sleep(for: delay)
             _ = try? await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
             try? await Task.sleep(for: .milliseconds(200))
-            if NSWorkspace.shared.frontmostApplication == previous { return }
+            if NSWorkspace.shared.frontmostApplication == app { return true }
         }
+        return false
+    }
+
+    /// Once the turn is over: if a step had to bring an app forward to work in it, like Slack to type a
+    /// message, the user goes back to what they were doing.
+    func goBack() async {
+        guard broughtForward, let returnTo, NSWorkspace.shared.frontmostApplication != returnTo else { return }
+        broughtForward = false
+        let back = await reopen(returnTo, after: .milliseconds(300))
+        log.append("Went back to \(returnTo.localizedName ?? "the user's app"): \(back ? "done" : "didn't work")")
     }
 
     /// The step needs the screen, so what was opened in the background comes forward now.
@@ -566,9 +590,12 @@ final class Hands {
         guard let app = waitingBehind else { return }
         waitingBehind = nil
         guard !app.isTerminated, NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier else { return }
-        app.activate()
+        // A background app can't bring another forward with activate(), so this also goes through Launch Services.
+        _ = await reopen(app, after: .zero)
         await settle(app)
         listIsCurrent = false
+        broughtForward = true
+        log.append("  brought \(app.localizedName ?? "the app") forward to work in it")
     }
 
     /// Waits for an app to come to the front with a window, so the next step lands in it.

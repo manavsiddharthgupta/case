@@ -548,9 +548,8 @@ final class Assistant {
                 phase = .ready
                 imagesInSession += (shot == nil ? 0 : 1) + hands.looksThisTurn
                 finishTurn(question: text, chat: chat)
-                if let shot {
-                    Self.saveLastQuestion(shot: shot, scan: scan, sent: context, answer: raw, spots: spots, steps: hands.log)
-                }
+                await hands.goBack()
+                Self.saveLastQuestion(shot: shot, scan: scan, sent: context, answer: raw, spots: spots, steps: hands.log)
             } catch {
                 speaker.stop()
                 pointer.finishPointing()
@@ -853,15 +852,14 @@ final class Assistant {
 
     /// Keeps a copy of the last question, exactly as sent, to check pointing against.
     /// Only the latest one is kept, in ~/Library/Application Support/Case/last-question/.
-    private static func saveLastQuestion(shot: ScreenCapture.Shot, scan: ScreenElements.Scan, sent: String,
+    private static func saveLastQuestion(shot: ScreenCapture.Shot?, scan: ScreenElements.Scan, sent: String,
                                          answer: String, spots: [Spot], steps: [String]) {
         let folder = URL.applicationSupportDirectory.appending(path: "Case/last-question", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let screen = shot.screen
         let pointed = spots.isEmpty ? "nothing" : spots.map { "\($0.why): \($0.rect), exact: \($0.exact)" }.joined(separator: "; ")
         let report = """
             Asked: \(Date.now.formatted())
-            Screen (AppKit): \(screen.frame), scale \(screen.scale), main display height \(screen.mainDisplayHeight)
+            Screen (AppKit): \(shot.map { "\($0.screen.frame), scale \($0.screen.scale), main display height \($0.screen.mainDisplayHeight)" } ?? "none, asked in Case's window")
             Button list: \(scan.summary)
             Pointed at (AppKit, in order): \(pointed)
             Steps taken:\(steps.isEmpty ? " none" : "\n  " + steps.joined(separator: "\n  "))
@@ -873,7 +871,7 @@ final class Assistant {
             \(answer)
             """
         try? report.write(to: folder.appending(path: "question.txt"), atomically: true, encoding: .utf8)
-        try? shot.jpeg.write(to: folder.appending(path: "screenshot.jpg"))
+        if let shot { try? shot.jpeg.write(to: folder.appending(path: "screenshot.jpg")) }
     }
 
 }
