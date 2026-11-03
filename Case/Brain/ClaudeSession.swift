@@ -91,8 +91,9 @@ final class ClaudeSession {
         browsers, list every app with kind "app" and no query, then choose from that list.
         - Use read_page before scrolling or using look to find something in a page or document. To find out what's \
         on a page you opened, use read_page, not look, so it stays in the background.
-        - When they ask for a screenshot or picture of something, use screenshot. It's saved, copied and shown to them, \
-        so never say you can't send one. Use it straight after opening something, without look.
+        - Use screenshot only when they ask for a screenshot or picture. It's saved, copied and shown to them, \
+        so never say you can't send one. After opening something, take it straight away, without look. \
+        To see the screen for yourself, use look, not screenshot.
         - Apps, links and files open in the background so the user's work isn't disturbed. Only work in them on \
         screen (look, click, write, press_keys, scroll) when the task needs it, since that brings them to the front. \
         Pass show only when they ask to see something or switch to it.
