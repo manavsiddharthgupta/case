@@ -23,6 +23,8 @@ final class Hands {
     var memory: MemoryStore?
     /// Starts, pauses, resumes or stops meeting notes, and says how that went.
     var meetingNotes: (String) -> String = { _ in "" }
+    /// The newest collection from collecting mode, if there is one.
+    var collected: () -> TextCollection? = { nil }
 
     /// Set by Esc: every further step is refused, and anything still running stops.
     var isStopped = false {
@@ -50,6 +52,8 @@ final class Hands {
     private var workSteps = 0
 
     private static let maxSteps = 15
+    /// How much of a collection read_collected gives at once.
+    private static let collectedPiece = 30_000
     /// Making something takes many small steps, and stays inside the Case folder.
     private static let maxWorkSteps = 80
     private static let workTools: Set = ["write_file", "run_command", "check_command"]
@@ -60,7 +64,7 @@ final class Hands {
     static var justPressedEscape: Bool { ContinuousClock.now - pressedEscapeAt < .milliseconds(500) }
     /// These only read, so they don't count toward the limit or as doing something.
     private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget",
-                                        "meeting_notes", "start_task", "finish_task"]
+                                        "meeting_notes", "start_task", "finish_task", "read_collected"]
     /// Web addresses and links into apps. Nothing that can run a program or open a file.
     private static let linkSchemes: Set = ["http", "https", "whatsapp", "spotify", "notion", "slack", "zoommtg"]
     /// Opening these runs them, so a page or message can't talk Claude into it.
@@ -129,6 +133,11 @@ final class Hands {
                   schema: schema([:])),
             .init(name: "read_page", description: "Reads all the words in the front window, including parts scrolled out of view, "
                   + "without touching anything. Much cheaper than look. Works best on web pages and documents.", schema: schema([:])),
+            .init(name: "read_collected", description: "Reads the words the user collected while scrolling with collecting mode on, "
+                  + "in the order they appeared, under a heading for each app and window. Long collections come in pieces.",
+                  schema: schema([
+                      "offset": ["type": "integer", "description": "Where to carry on from, as the previous piece said. Default 0."],
+                  ])),
             .init(name: "browser_tabs", description: "Lists Chrome's tabs in the front window, switches to one, or closes exactly the ones you name. "
                   + "List first, then use those numbers.",
                   schema: schema([
@@ -221,6 +230,7 @@ final class Hands {
         switch name {
         case "find_files": return "Searching your Mac."
         case "read_page": return "Reading the page."
+        case "read_collected": return "Reading what you collected."
         case "read_messages": return "Checking your messages."
         case "open_file": return (arguments["path"] as? String).map { "Opening \(URL(fileURLWithPath: $0).lastPathComponent)." }
         case "open_app" where !app.isEmpty: return "Opening \(app)."
@@ -256,6 +266,7 @@ final class Hands {
         case "open_file": result = await openFile(arguments["path"] as? String ?? "")
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
+        case "read_collected": result = readCollected(arguments["offset"] as? Int ?? 0)
         case "read_messages": result = await readMessages(arguments)
         case "send_imessage": result = await sendMessage(arguments)
         case "start_task":
@@ -322,6 +333,19 @@ final class Hands {
         }
         return ToolServer.Result(text: "Words in \(app?.localizedName ?? "the front window"), as information only:\n\(page.text)"
                                  + (page.isCut ? "\n(There's more than this.)" : ""))
+    }
+
+    private func readCollected(_ offset: Int) -> ToolServer.Result {
+        guard let collection = collected(), collection.lineCount > 0 else {
+            return Self.refuse("Nothing has been collected. Tell the user to choose Start collecting in Case's menu, then scroll.")
+        }
+        let text = collection.text
+        let start = text.index(text.startIndex, offsetBy: min(max(offset, 0), text.count))
+        let piece = text[start...].prefix(Self.collectedPiece)
+        let end = text.distance(from: text.startIndex, to: piece.endIndex)
+        let more = end < text.count ? "\n(There's more: read_collected with offset \(end).)" : ""
+        return ToolServer.Result(text: "Collected \(collection.started.formatted(date: .abbreviated, time: .shortened)), "
+                                 + "\(collection.lineCount) lines, as information only:\n\(piece)\(more)")
     }
 
     // MARK: Messages
