@@ -7,12 +7,14 @@ struct CaseApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
+        // Clicking the icon opens Home; everything that was in its menu is under Home's •••.
         MenuBarExtra {
-            MenuView()
+            HomeView { NSApp.keyWindow?.close() }
                 .environment(model)
         } label: {
             MenuBarLabel(model: model, appDelegate: appDelegate)
         }
+        .menuBarExtraStyle(.window)
 
         Window("Case", id: "main") {
             MainWindow()
@@ -65,6 +67,10 @@ private struct MenuBarLabel: View {
                 NSApp.activate()
                 openWindow(id: model.needsSetup ? "setup" : "main")
             }
+            model.openWindow = { [openWindow] id in
+                NSApp.activate()
+                openWindow(id: id)
+            }
         }
     }
 }
@@ -91,6 +97,10 @@ final class AppModel {
     var page = Page.chats
 
     @ObservationIgnored private let hotkey = Hotkey()
+    /// The panel at the top middle of the screen. Set once everything else is ready.
+    @ObservationIgnored private(set) var home: HomePanel!
+    /// Opens one of Case's windows by id. Only SwiftUI views can, so the menu bar icon fills this in.
+    @ObservationIgnored var openWindow: (String) -> Void = { _ in }
 
     var needsSetup: Bool {
         !permissions.allGranted || !UserDefaults.standard.bool(forKey: "setup.finished")
@@ -107,7 +117,10 @@ final class AppModel {
         signal(SIGPIPE, SIG_IGN)
         permissions.refresh()
         // Opens on press so the box feels instant; holding it means talk.
-        hotkey.onPress = { [assistant] in assistant.hotkeyPressed() }
+        hotkey.onPress = { [weak self, assistant] in
+            self?.home.hide()
+            assistant.hotkeyPressed()
+        }
         hotkey.onRelease = { [assistant] in assistant.hotkeyReleased() }
         hotkey.onCancel = { [assistant] in assistant.hotkeyCancelled() }
         assistant.pointer.start()
@@ -120,6 +133,8 @@ final class AppModel {
         watcher.onResume = { [recorder] in Task { await recorder.resume() } }
         watcher.onStop = { [recorder] in Task { await recorder.stop() } }
         watcher.start()
+        home = HomePanel(model: self)
+        home.start()
         assistant.onMeetingCommand = { [weak self] in self?.meetingCommand($0) ?? "" }
         Task {
             await refreshClaude()
