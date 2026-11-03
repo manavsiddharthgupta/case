@@ -57,12 +57,14 @@ struct ChatsPage: View {
                 VStack(alignment: .leading, spacing: 22) {
                     ForEach(chat.turns) { turn in
                         Asked(text: turn.question)
-                        Replied(text: turn.answer.isEmpty ? "Stopped before answering." : turn.answer, faint: turn.answer.isEmpty)
+                        Replied(text: turn.answer.isEmpty ? "Stopped before answering." : turn.answer, faint: turn.answer.isEmpty,
+                                images: turn.images)
                     }
                     if isAnswering {
                         Asked(text: assistant.question)
                         let waiting = assistant.status.isEmpty ? "Thinking…" : assistant.status
-                        Replied(text: assistant.answer.isEmpty ? waiting : assistant.answer, faint: assistant.answer.isEmpty)
+                        Replied(text: assistant.answer.isEmpty ? waiting : assistant.answer, faint: assistant.answer.isEmpty,
+                                images: assistant.images)
                     }
                 }
                 .frame(maxWidth: 640)
@@ -155,17 +157,64 @@ private struct Asked: View {
     }
 }
 
-/// What Case said.
+/// What Case said, and any screenshot it took for you.
 private struct Replied: View {
     let text: String
     var faint = false
+    var images: [String] = []
 
     var body: some View {
-        Text(text)
-            .font(Theme.font(15))
-            .lineSpacing(4)
-            .foregroundStyle(faint ? Theme.muted : Theme.foreground)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(text)
+                .font(Theme.font(15))
+                .lineSpacing(4)
+                .foregroundStyle(faint ? Theme.muted : Theme.foreground)
+                .textSelection(.enabled)
+            ForEach(images, id: \.self) { path in
+                Screenshot(path: path)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A screenshot in the chat. Click to open it; right-click to copy it or find it in Finder.
+private struct Screenshot: View {
+    let path: String
+    @State private var image: NSImage?
+    @State private var loaded = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Button {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: path))
+                } label: {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(.rect(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.border))
+                }
+                .buttonStyle(.plain)
+                .help("Open \(URL(fileURLWithPath: path).lastPathComponent)")
+                .contextMenu {
+                    Button("Copy Image") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.writeObjects([image])
+                    }
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
+                }
+            } else if loaded {
+                Text("Screenshot was moved or deleted.")
+                    .font(Theme.font(13))
+                    .foregroundStyle(Theme.muted)
+            }
+        }
+        .frame(maxWidth: 480, alignment: .leading)
+        .task(id: path) {
+            image = NSImage(contentsOfFile: path)
+            loaded = true
+        }
     }
 }

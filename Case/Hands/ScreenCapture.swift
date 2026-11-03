@@ -104,13 +104,10 @@ enum ScreenCapture {
             .filter({ $0.owningApplication?.processID == pid && $0.windowLayer == 0 && $0.frame.width > 100 && $0.frame.height > 100 })
             .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
         else { throw CaptureError.noWindow }
-        let scale = NSScreen.screens.first { $0.frame.intersects(window.frame) }?.backingScaleFactor ?? 2
-        let config = SCStreamConfiguration()
-        config.width = Int(window.frame.width * scale)
-        config.height = Int(window.frame.height * scale)
-        config.showsCursor = false
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = fullSize(filter)
         config.ignoreShadowsSingleWindow = true
-        return try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
 
     /// The whole screen under the mouse at full resolution, without Case's own windows.
@@ -121,12 +118,17 @@ enum ScreenCapture {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { $0.processID == ownPID },
                                      exceptingWindows: [])
-        let scale = NSScreen.screens.first { $0.frame == screen.frame }?.backingScaleFactor ?? 2
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: fullSize(filter))
+    }
+
+    /// Exactly the size of what's captured, in real pixels, as macOS measures it. Working it out from
+    /// the window's frame and the screen's scale can come out bigger, leaving a blank edge.
+    private nonisolated static func fullSize(_ filter: SCContentFilter) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
-        config.width = Int(screen.frame.width * scale)
-        config.height = Int(screen.frame.height * scale)
+        config.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+        config.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
         config.showsCursor = false
-        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        return config
     }
 
     @concurrent

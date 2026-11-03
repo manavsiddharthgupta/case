@@ -1,12 +1,31 @@
 import Foundation
 
-/// A saved conversation. Text only: screenshots are never kept.
+/// A saved conversation: the words, plus any screenshot you asked Case to take. The screenshots
+/// sent along with each question are never kept.
 nonisolated struct Chat: Codable, Identifiable, Hashable, Sendable {
     nonisolated struct Turn: Codable, Identifiable, Hashable, Sendable {
         var id = UUID()
         var question: String
         var answer: String
         var date = Date.now
+        /// Paths of screenshots taken for you during this turn.
+        var images: [String] = []
+
+        init(question: String, answer: String, images: [String] = []) {
+            self.question = question
+            self.answer = answer
+            self.images = images
+        }
+
+        // Chats saved before screenshots have no images.
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(UUID.self, forKey: .id)
+            question = try container.decode(String.self, forKey: .question)
+            answer = try container.decode(String.self, forKey: .answer)
+            date = try container.decode(Date.self, forKey: .date)
+            images = try container.decodeIfPresent([String].self, forKey: .images) ?? []
+        }
     }
 
     var id = UUID()
@@ -40,10 +59,10 @@ final class ChatStore {
         return chat.id
     }
 
-    func add(question: String, answer: String, to id: UUID) {
+    func add(question: String, answer: String, images: [String] = [], to id: UUID) {
         guard let index = chats.firstIndex(where: { $0.id == id }) else { return }
         var chat = chats.remove(at: index)
-        chat.turns.append(.init(question: question, answer: answer))
+        chat.turns.append(.init(question: question, answer: answer, images: images))
         chat.updated = .now
         chats.insert(chat, at: 0)
         save()

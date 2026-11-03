@@ -14,6 +14,8 @@ final class Assistant {
 
     private(set) var question = ""
     private(set) var answer = ""
+    /// Screenshots taken for you this turn, shown in the chat under the answer.
+    private(set) var images: [String] = []
     private(set) var phase: Phase = .ready
     /// The saved chat this conversation belongs to.
     private(set) var currentChat: UUID?
@@ -128,7 +130,12 @@ final class Assistant {
             if let chat, case .done(let summary, _) = item.state { chats.add(question: "Task: \(item.title)", answer: summary, to: chat) }
         }
         hands.tap = { [weak self] rect in await self?.pointer.tap(at: rect) }
-        hands.showScreenshot = { [weak self] image, file in self?.thumbnail.show(image, file: file) }
+        hands.showScreenshot = { [weak self] image, file in
+            guard let self else { return }
+            images.append(file.path)
+            // Asked from the window, it shows in the chat there; at the cursor, in the corner.
+            if !windowTurn { thumbnail.show(image, file: file) }
+        }
         // Like a person working beside you: each step shows in the caption, and is said out loud
         // unless the last one is still being said.
         hands.onProgress = { [weak self] line in
@@ -393,6 +400,7 @@ final class Assistant {
         windowTurn = inWindow
         self.question = text
         answer = ""
+        images = []
         status = ""
         phase = .looking
         lastAsked = .now
@@ -650,7 +658,7 @@ final class Assistant {
 
     private func finishTurn(question: String, chat: UUID) {
         history.append((question, answer))
-        chats.add(question: question, answer: answer, to: chat)
+        chats.add(question: question, answer: answer, images: images, to: chat)
         turnsInSession += 1
         // Warm up the next session one turn before it's needed.
         if turnsInSession == Self.turnsPerSession - 1, nextSession == nil {
