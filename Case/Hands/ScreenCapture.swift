@@ -1,5 +1,6 @@
 import AppKit
 import ScreenCaptureKit
+import Vision
 
 /// Takes the screenshot that goes along with each question.
 enum ScreenCapture {
@@ -90,6 +91,29 @@ enum ScreenCapture {
     /// Captures that screen without Case's own windows.
     static func capture(_ screen: ScreenGeometry) async throws -> Shot {
         Shot(jpeg: try await capture(displayID: screen.displayID, pixelSize: screen.pixelSize), screen: screen)
+    }
+
+    /// The words in a screenshot, top to bottom, for apps that draw their own text. `window`, in
+    /// accessibility coordinates, keeps it to that window, leaving out the menu bar, Dock and the rest.
+    @concurrent
+    nonisolated static func recognizeText(in shot: Shot, within window: CGRect? = nil) async -> [String] {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = true
+        if let window {
+            // Vision measures from 0 to 1, from the bottom left.
+            let screen = shot.screen.topLeftFrame
+            let region = CGRect(x: (window.minX - screen.minX) / screen.width, y: (screen.maxY - window.maxY) / screen.height,
+                                width: window.width / screen.width, height: window.height / screen.height)
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+            if !region.isEmpty { request.regionOfInterest = region }
+        }
+        guard (try? VNImageRequestHandler(data: shot.jpeg).perform([request])) != nil else { return [] }
+        // Vision's origin is bottom left, so the highest box comes first.
+        return (request.results ?? [])
+            .sorted { ($0.boundingBox.maxY, -$0.boundingBox.minX) > ($1.boundingBox.maxY, -$1.boundingBox.minX) }
+            .compactMap { $0.topCandidates(1).first?.string }
     }
 
     @concurrent

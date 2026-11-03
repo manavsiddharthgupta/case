@@ -56,6 +56,8 @@ private struct MenuBarLabel: View {
                 Image(systemName: "record.circle")
             } else if model.recorder.phase == .paused {
                 Image(systemName: "pause.circle")
+            } else if model.collector.isOn {
+                Image(systemName: "text.viewfinder")
             } else {
                 Image(nsImage: .menuBarMark)
             }
@@ -80,7 +82,9 @@ final class AppModel {
     let chats = ChatStore()
     let memory = MemoryStore()
     let meetings = MeetingStore()
+    let collections = CollectionStore()
     let assistant: Assistant
+    let collector: Collector
     let recorder: MeetingRecorder
     let watcher = MeetingWatcher()
     /// Looks for a new version once a day, and asks before installing it.
@@ -102,6 +106,7 @@ final class AppModel {
     init() {
         assistant = Assistant(chats: chats, memory: memory)
         recorder = MeetingRecorder(meetings: meetings)
+        collector = Collector(store: collections)
         Theme.registerFont()
         // Writing to a claude that just exited should be an error, not a crash.
         signal(SIGPIPE, SIG_IGN)
@@ -121,6 +126,7 @@ final class AppModel {
         watcher.onStop = { [recorder] in Task { await recorder.stop() } }
         watcher.start()
         assistant.onMeetingCommand = { [weak self] in self?.meetingCommand($0) ?? "" }
+        assistant.collected = { [collections, collector] in (collections.latest, collector.isOn) }
         Task {
             await refreshClaude()
             guard case .connected = claude else { return }

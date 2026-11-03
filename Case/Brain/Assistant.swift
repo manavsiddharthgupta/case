@@ -21,6 +21,8 @@ final class Assistant {
     private(set) var status = ""
     /// Starts, pauses, resumes or stops meeting notes, and says how that went.
     @ObservationIgnored var onMeetingCommand: (String) -> String = { _ in "" }
+    /// The newest collection, and whether collecting is on right now.
+    @ObservationIgnored var collected: () -> (latest: TextCollection?, isOn: Bool) = { (nil, false) }
 
     let speaker = Speaker()
     let pointer = Pointer()
@@ -36,6 +38,8 @@ final class Assistant {
     private static let turnsBeforeTidying = 8
     private static let imagesBeforeTidying = 10
     private static let quietMoment: Duration = .seconds(2 * 60)
+    /// How long after collecting stops Claude is still told about it.
+    private static let collectionStaysRecent: TimeInterval = 2 * 60 * 60
     /// Without a quiet moment, it happens right before the next question, which adds no wait.
     private static let turnsPerSession = 12
     /// How long ⌥⌘ must be held before it counts as talking rather than a tap.
@@ -98,6 +102,7 @@ final class Assistant {
         self.memory = memory
         hands.memory = memory
         hands.meetingNotes = { [weak self] in self?.onMeetingCommand($0) ?? "" }
+        hands.collected = { [weak self] in self?.collected().latest }
         // The hands: Claude's tools, served to Claude Code from inside the app.
         toolServer.tools = Hands.tools
         toolServer.call = { [hands] name, arguments in await hands.call(name, arguments) }
@@ -366,6 +371,16 @@ final class Assistant {
         Task { await MemoryLearner.learn(from: chat, chats: chats, memory: memory) }
     }
 
+    /// Says there's a recent collection Claude can read, without sending its words every time.
+    private var collectedNote: String? {
+        let (latest, isOn) = collected()
+        guard let latest, latest.lineCount > 0,
+              isOn || Date.now.timeIntervalSince(latest.ended ?? .now) < Self.collectionStaysRecent else { return nil }
+        let when = isOn ? "are collecting right now" : "collected at \(latest.started.formatted(date: .omitted, time: .shortened))"
+        return "They \(when): \(latest.lineCount) lines from \(latest.apps.joined(separator: ", ")) while scrolling. "
+            + "Use read_collected if the question is about it."
+    }
+
     func copyLastAnswer() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(answer, forType: .string)
@@ -438,6 +453,9 @@ final class Assistant {
 
                 if !selected.isEmpty {
                     context = "Selected text:\n\(selected.prefix(4000))\n\n" + context
+                }
+                if let note = collectedNote {
+                    context = note + "\n\n" + context
                 }
                 if let remembered = memory.forQuestion {
                     context = remembered + "\n\n" + context

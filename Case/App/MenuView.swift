@@ -29,6 +29,16 @@ struct MenuView: View {
             }
             .disabled(model.recorder.isActive)
         }
+        if model.collector.isOn {
+            let count = model.collector.lineCount.formatted()
+            Button(model.collector.isFull ? "Stop collecting (full, \(count) lines)" : "Stop collecting (\(count) lines)") {
+                model.collector.stop()
+            }
+        } else {
+            Button("Start collecting") { model.collector.start() }
+        }
+        Button("Copy last collection") { copy(model.collections.latest?.text ?? "") }
+            .disabled(model.collections.latest == nil)
 
         Divider()
 
@@ -70,6 +80,11 @@ struct MenuView: View {
 
         Button("Quit Case") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func open(_ page: AppModel.Page) {
