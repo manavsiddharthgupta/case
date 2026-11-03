@@ -60,6 +60,7 @@ final class Assistant {
     @ObservationIgnored private let toolServer = ToolServer()
     @ObservationIgnored private let hands = Hands()
     @ObservationIgnored private let confirmCard = ConfirmCard()
+    @ObservationIgnored private let thumbnail = ScreenshotThumbnail()
     /// Long jobs running beside you, each with its own bar and its own Claude.
     @ObservationIgnored private let tasks = TaskManager()
     @ObservationIgnored private lazy var taskBar = TaskBar(tasks: tasks)
@@ -127,6 +128,7 @@ final class Assistant {
             if let chat, case .done(let summary, _) = item.state { chats.add(question: "Task: \(item.title)", answer: summary, to: chat) }
         }
         hands.tap = { [weak self] rect in await self?.pointer.tap(at: rect) }
+        hands.showScreenshot = { [weak self] image, file in self?.thumbnail.show(image, file: file) }
         // Like a person working beside you: each step shows in the caption, and is said out loud
         // unless the last one is still being said.
         hands.onProgress = { [weak self] line in
