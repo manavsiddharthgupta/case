@@ -718,15 +718,20 @@ final class Assistant {
         return text.wholeMatch(of: pattern).map { String($0.output.name) }
     }
 
+    /// Opening goes behind what you're doing; "show" or "switch to" brings it to the front.
     private func openDirectly(_ text: String, chat: UUID) -> Bool {
-        let pattern = #/^(?:please\s+)?(?:open|launch|start)\s+(?:the\s+)?(?<name>[\w .'-]+?)(?:\s+app)?[.!]?$/#.ignoresCase()
+        let pattern = #/^(?:please\s+)?(?<verb>open|launch|start|show|switch to|go to)\s+(?:the\s+)?(?<name>[\w .'-]+?)(?:\s+app)?[.!]?$/#
+            .ignoresCase()
         guard let match = text.wholeMatch(of: pattern), let url = Hands.findApp(named: String(match.output.name)) else {
             return false
         }
         let name = url.deletingPathExtension().lastPathComponent
+        let show = ["show", "switch to", "go to"].contains(match.output.verb.lowercased())
         phase = .ready
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
-        replyDirectly("Opening \(name).", to: text, chat: chat, showFor: .seconds(2))
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = show
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+        replyDirectly(show ? "Switching to \(name)." : "\(name) is open in the background.", to: text, chat: chat, showFor: .seconds(2))
         return true
     }
 
