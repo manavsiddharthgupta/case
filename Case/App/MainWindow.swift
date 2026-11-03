@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Case's window: your chats, meetings and memory, with a sidebar to move between them.
+/// Case's window: your chats, meetings, collections and memory, with a sidebar to move between them.
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @AppStorage("window.sidebarHidden") private var sidebarHidden = false
@@ -16,6 +16,7 @@ struct MainWindow: View {
                 switch model.page {
                 case .chats: ChatsPage()
                 case .meetings: MeetingsPage()
+                case .collected: CollectionsPage()
                 case .memory: MemoryPage()
                 }
             }
@@ -208,6 +209,7 @@ extension AppModel.Page {
         switch self {
         case .chats: "Chats"
         case .meetings: "Meetings"
+        case .collected: "Collected"
         case .memory: "Memory"
         }
     }
@@ -216,6 +218,7 @@ extension AppModel.Page {
         switch self {
         case .chats: "bubble.left"
         case .meetings: "waveform"
+        case .collected: "text.viewfinder"
         case .memory: "brain"
         }
     }

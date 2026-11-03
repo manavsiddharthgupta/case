@@ -75,7 +75,7 @@ private struct MenuBarLabel: View {
 @Observable
 final class AppModel {
     enum Page: CaseIterable {
-        case chats, meetings, memory
+        case chats, meetings, collected, memory
     }
 
     let permissions = Permissions()
