@@ -119,7 +119,9 @@ final class Hands {
         ]
         let show: [String: Any] = [
             "type": "boolean",
-            "description": "True only if the user asked to see it or switch to it. Otherwise it opens in the background, "
+            "description": "True only when they want it in front of them right now, in words like \"show me\", \"switch to\", "
+                + "\"bring up\" or \"put it on my screen\". Wanting to see, check or read what's in something is not that: "
+                + "leave this out and use read_page or screenshot. Otherwise it opens in the background, "
                 + "and comes forward by itself if you look, click, write, press keys or scroll next.",
         ]
         let irreversible: [String: Any] = [
@@ -141,7 +143,7 @@ final class Hands {
                       "kind": ["type": "string", "enum": ["any", "app", "folder"]],
                   ])),
             .init(name: "open_file", description: "Opens a file or folder in its usual app, using a path from find_files. For apps, use open_app.",
-                  schema: schema(["path": ["type": "string"], "show": show], required: ["path"])),
+                  schema: schema(["path": ["type": "string"], "bring_to_front": show], required: ["path"])),
             .init(name: "system_info", description: "The date and time, this Mac's chip and memory, battery, free storage, and which apps are open.",
                   schema: schema([:])),
             .init(name: "read_page", description: "Reads all the words in the front window, including parts scrolled out of view, "
@@ -208,13 +210,13 @@ final class Hands {
             .init(name: "look", description: "Takes a fresh screenshot and lists what's on screen with new numbers. "
                   + "Use it after the screen changes and before clicking anything new.", schema: schema([:])),
             .init(name: "open_app", description: "Opens an app by name, like Spotify or WhatsApp, behind what the user is doing.",
-                  schema: schema(["name": ["type": "string"], "show": show], required: ["name"])),
+                  schema: schema(["name": ["type": "string"], "bring_to_front": show], required: ["name"])),
             .init(name: "close_app", description: "Quits an app by name, the same as choosing Quit from its menu. "
                   + "Most apps just close. An app with unsaved work may show its own save question, which the user answers.",
                   schema: schema(["name": ["type": "string"]], required: ["name"])),
             .init(name: "open_url", description: "Opens a web address in the browser, or a link into an app (spotify, whatsapp, notion, slack, zoommtg). "
                   + "To put a search on screen, open the results page directly.",
-                  schema: schema(["url": ["type": "string"], "show": show], required: ["url"])),
+                  schema: schema(["url": ["type": "string"], "bring_to_front": show], required: ["url"])),
             .init(name: "click", description: "Clicks something on screen: a number from the latest list, or x,y in the latest screenshot.",
                   schema: schema([
                       "element": ["type": "integer"], "x": ["type": "number"], "y": ["type": "number"],
@@ -279,7 +281,7 @@ final class Hands {
         case "look": result = await look()
         case "find_files":
             result = ToolServer.Result(text: await MacTools.findFiles(arguments["query"] as? String ?? "", kind: arguments["kind"] as? String ?? "any"))
-        case "open_file": result = await openFile(arguments["path"] as? String ?? "", show: arguments["show"] as? Bool ?? false)
+        case "open_file": result = await openFile(arguments["path"] as? String ?? "", show: bringToFront(arguments))
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
         case "screenshot": result = await screenshot(of: arguments["of"] as? String ?? "window")
@@ -303,8 +305,8 @@ final class Hands {
             let forgotten = memory?.forget(arguments["fact"] as? String ?? "") ?? false
             result = forgotten ? ToolServer.Result(text: "Forgotten.") : Self.refuse("That isn't on the list. Use its exact words.")
         case "meeting_notes": result = ToolServer.Result(text: meetingNotes(arguments["action"] as? String ?? ""))
-        case "open_app": result = await openApp(arguments["name"] as? String ?? "", show: arguments["show"] as? Bool ?? false)
-        case "open_url": result = await openURL(arguments["url"] as? String ?? "", show: arguments["show"] as? Bool ?? false)
+        case "open_app": result = await openApp(arguments["name"] as? String ?? "", show: bringToFront(arguments))
+        case "open_url": result = await openURL(arguments["url"] as? String ?? "", show: bringToFront(arguments))
         case "close_app": result = await closeApp(arguments["name"] as? String ?? "")
         case "click": result = await click(arguments)
         case "write": result = await write(arguments["text"] as? String ?? "")
@@ -536,6 +538,15 @@ final class Hands {
         } catch {
             return Self.refuse("Couldn't open \(name): \(error.localizedDescription)")
         }
+    }
+
+    /// Claude asks for something to come to the front, but it only does if the user's own words asked for that.
+    /// "See what's on this page" means read it, and it once brought Chrome forward.
+    private func bringToFront(_ arguments: [String: Any]) -> Bool {
+        guard arguments["bring_to_front"] as? Bool == true else { return false }
+        let asked = question.contains(/(?i)\b(show me|show it|switch to|bring (it |that )?up|bring .* to the front|put .* on (my )?screen|pull up|take me to)\b/)
+        if !asked { log.append("  bring_to_front ignored: the user didn't ask to have it in front") }
+        return asked
     }
 
     /// Opened without taking over the screen: the user carries on, and it waits until a step needs it.
