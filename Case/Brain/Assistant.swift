@@ -60,6 +60,7 @@ final class Assistant {
     @ObservationIgnored private let toolServer = ToolServer()
     @ObservationIgnored private let hands = Hands()
     @ObservationIgnored private let confirmCard = ConfirmCard()
+    @ObservationIgnored private let explainer = ExplainerPanel()
     /// Long jobs running beside you, each with its own bar and its own Claude.
     @ObservationIgnored private let tasks = TaskManager()
     @ObservationIgnored private lazy var taskBar = TaskBar(tasks: tasks)
@@ -98,6 +99,10 @@ final class Assistant {
         self.memory = memory
         hands.memory = memory
         hands.meetingNotes = { [weak self] in self?.onMeetingCommand($0) ?? "" }
+        hands.show3D = { [weak self] scene in
+            guard let self else { return }
+            explainer.show(scene, near: pointer.anchor)
+        }
         // The hands: Claude's tools, served to Claude Code from inside the app.
         toolServer.tools = Hands.tools
         toolServer.call = { [hands] name, arguments in await hands.call(name, arguments) }
@@ -293,6 +298,7 @@ final class Assistant {
         hands.isStopped = true
         stopAnsweringCard()
         confirmCard.cancel()
+        explainer.hide()
         guard phase != .ready || speaker.isSpeaking || pointer.caption != nil else { return }
         trailTask?.cancel()
         speaker.stop()
@@ -385,6 +391,7 @@ final class Assistant {
         speaker.stop()
         cancelPointing()
         pointer.setCaption(nil)
+        explainer.hide()
         markLog = []
         try? FileManager.default.removeItem(at: Self.marksFile)
         silenced = false

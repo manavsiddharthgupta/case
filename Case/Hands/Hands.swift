@@ -23,6 +23,8 @@ final class Hands {
     var memory: MemoryStore?
     /// Starts, pauses, resumes or stops meeting notes, and says how that went.
     var meetingNotes: (String) -> String = { _ in "" }
+    /// Puts a 3D explanation on screen beside the buddy.
+    var show3D: (Scene3D) -> Void = { _ in }
 
     /// Set by Esc: every further step is refused, and anything still running stops.
     var isStopped = false {
@@ -60,7 +62,7 @@ final class Hands {
     static var justPressedEscape: Bool { ContinuousClock.now - pressedEscapeAt < .milliseconds(500) }
     /// These only read, so they don't count toward the limit or as doing something.
     private static let readOnly: Set = ["look", "find_files", "system_info", "read_page", "read_messages", "remember", "forget",
-                                        "meeting_notes", "start_task", "finish_task"]
+                                        "meeting_notes", "start_task", "finish_task", "show_3d"]
     /// Web addresses and links into apps. Nothing that can run a program or open a file.
     private static let linkSchemes: Set = ["http", "https", "whatsapp", "spotify", "notion", "slack", "zoommtg"]
     /// Opening these runs them, so a page or message can't talk Claude into it.
@@ -181,6 +183,29 @@ final class Hands {
                   schema: schema(["fact": ["type": "string"]], required: ["fact"])),
             .init(name: "meeting_notes", description: "Starts, pauses, resumes or stops transcribing a meeting. Stopping writes up the notes.",
                   schema: schema(["action": ["type": "string", "enum": ["start", "pause", "resume", "stop"]]], required: ["action"])),
+            .init(name: "show_3d", description: "Shows a simple 3D picture beside the user, made of basic shapes, with labels "
+                  + "pointing at the parts. It turns slowly, and they can drag it. Use it to explain something physical or spatial: "
+                  + "a setup, how parts fit together, the layers of something. Units are roughly metres, y is up, the ground is y = 0.",
+                  schema: schema([
+                      "title": ["type": "string", "description": "A few words, like \"Portrait lighting setup\"."],
+                      "parts": ["type": "array", "description": "Up to 40 shapes. Build each thing from a few shapes, like a stand from a "
+                                + "thin cylinder and a cone.",
+                                "items": schema([
+                                    "id": ["type": "string"],
+                                    "shape": ["type": "string", "enum": ["box", "sphere", "cylinder", "cone", "capsule", "torus", "pyramid"]],
+                                    "size": ["type": "array", "items": ["type": "number"],
+                                             "description": "[width, height, depth]. Round shapes use width as their diameter."],
+                                    "position": ["type": "array", "items": ["type": "number"], "description": "[x, y, z] of its centre."],
+                                    "rotation": ["type": "array", "items": ["type": "number"], "description": "[x, y, z] in degrees."],
+                                    "color": ["type": "string", "description": "A name (white, black, grey, light grey, dark grey, red, "
+                                              + "orange, yellow, green, blue, purple, pink, brown, wood, skin, metal, gold, glass) or #RRGGBB."],
+                                ], required: ["id", "shape", "size"])],
+                      "labels": ["type": "array", "description": "Up to 10, each naming one part.",
+                                 "items": schema([
+                                     "text": ["type": "string", "description": "One to three words."],
+                                     "part": ["type": "string", "description": "The id of the part it points at."],
+                                 ], required: ["text", "part"])],
+                  ], required: ["parts"])),
             .init(name: "look", description: "Takes a fresh screenshot and lists what's on screen with new numbers. "
                   + "Use it after the screen changes and before clicking anything new.", schema: schema([:])),
             .init(name: "open_app", description: "Opens an app by name, like Spotify or WhatsApp, and brings it to the front.",
@@ -221,6 +246,7 @@ final class Hands {
         switch name {
         case "find_files": return "Searching your Mac."
         case "read_page": return "Reading the page."
+        case "show_3d": return "Drawing it."
         case "read_messages": return "Checking your messages."
         case "open_file": return (arguments["path"] as? String).map { "Opening \(URL(fileURLWithPath: $0).lastPathComponent)." }
         case "open_app" where !app.isEmpty: return "Opening \(app)."
@@ -256,6 +282,13 @@ final class Hands {
         case "open_file": result = await openFile(arguments["path"] as? String ?? "")
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
+        case "show_3d":
+            if let scene = Scene3D.decode(arguments) {
+                show3D(scene)
+                result = ToolServer.Result(text: "It's on screen. Now explain it in a few short sentences, going through the labels in order.")
+            } else {
+                result = Self.refuse("That couldn't be drawn. Give parts as a list, each with an id, a shape and a size.")
+            }
         case "read_messages": result = await readMessages(arguments)
         case "send_imessage": result = await sendMessage(arguments)
         case "start_task":
