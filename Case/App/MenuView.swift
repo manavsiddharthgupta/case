@@ -15,6 +15,7 @@ struct MenuView: View {
         Divider()
 
         Button("Open Case") { open(.chats) }
+        Button("Show Home") { model.home.show() }
         if model.recorder.isCapturing {
             if model.recorder.phase == .paused {
                 Button("Resume meeting notes") { Task { await model.recorder.resume() } }
