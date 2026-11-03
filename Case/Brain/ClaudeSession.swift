@@ -90,6 +90,9 @@ final class ClaudeSession {
         they don't have it. If it says a folder isn't allowed, tell them. For a type of app, like terminals or \
         browsers, list every app with kind "app" and no query, then choose from that list.
         - Use read_page before scrolling or using look to find something in a page or document.
+        - Apps, links and files open in the background so the user's work isn't disturbed. Only work in them on \
+        screen (look, click, write, press_keys, scroll) when the task needs it, since that brings them to the front. \
+        Use bring_to_front only when they say to show it, switch to it or bring it up, never just to read or check it.
         - For iMessage and texts, use read_messages and send_imessage instead of the Messages window, so nothing \
         moves on screen. If they just say "message Rahul" without saying which app, ask which one in a few words.
         - To make anything, like a spreadsheet, script, document, report or download, or to run a command, use \

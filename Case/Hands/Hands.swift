@@ -48,8 +48,15 @@ final class Hands {
     private var listIsCurrent = false
     private var steps = 0
     private var workSteps = 0
+    /// Opened behind the user's work this turn. It comes forward only when a step needs the screen.
+    private var waitingBehind: NSRunningApplication?
+    /// The app the user was in when they asked, to go back to if a step had to bring another forward.
+    private var returnTo: NSRunningApplication?
+    private var broughtForward = false
 
     private static let maxSteps = 15
+    /// These work through the screen, so whatever was opened in the background comes forward first.
+    private static let screenTools: Set = ["look", "click", "write", "press_keys", "scroll"]
     /// Making something takes many small steps, and stays inside the Case folder.
     private static let maxWorkSteps = 80
     private static let workTools: Set = ["write_file", "run_command", "check_command"]
@@ -80,6 +87,9 @@ final class Hands {
         isStopped = false
         log = []
         lookedAt = nil
+        waitingBehind = nil
+        returnTo = NSWorkspace.shared.frontmostApplication
+        broughtForward = false
     }
 
     /// A background task: no screen, and these are the user's own words, not Claude's retelling.
@@ -105,6 +115,13 @@ final class Hands {
             "description": "Three to six words said out loud while you do this, like \"Going to your chat with Rahul\". "
                 + "Leave it out for small in-between steps.",
         ]
+        let show: [String: Any] = [
+            "type": "boolean",
+            "description": "True only when they want it in front of them right now, in words like \"show me\", \"switch to\", "
+                + "\"bring up\" or \"put it on my screen\". Wanting to see, check or read what's in something is not that: "
+                + "leave this out and use read_page or screenshot. Otherwise it opens in the background, "
+                + "and comes forward by itself if you look, click, write, press keys or scroll next.",
+        ]
         let irreversible: [String: Any] = [
             "type": "boolean",
             "description": "True if this deletes or buys something. The app asks the user first.",
@@ -124,7 +141,7 @@ final class Hands {
                       "kind": ["type": "string", "enum": ["any", "app", "folder"]],
                   ])),
             .init(name: "open_file", description: "Opens a file or folder in its usual app, using a path from find_files. For apps, use open_app.",
-                  schema: schema(["path": ["type": "string"]], required: ["path"])),
+                  schema: schema(["path": ["type": "string"], "bring_to_front": show], required: ["path"])),
             .init(name: "system_info", description: "The date and time, this Mac's chip and memory, battery, free storage, and which apps are open.",
                   schema: schema([:])),
             .init(name: "read_page", description: "Reads all the words in the front window, including parts scrolled out of view, "
@@ -183,14 +200,14 @@ final class Hands {
                   schema: schema(["action": ["type": "string", "enum": ["start", "pause", "resume", "stop"]]], required: ["action"])),
             .init(name: "look", description: "Takes a fresh screenshot and lists what's on screen with new numbers. "
                   + "Use it after the screen changes and before clicking anything new.", schema: schema([:])),
-            .init(name: "open_app", description: "Opens an app by name, like Spotify or WhatsApp, and brings it to the front.",
-                  schema: schema(["name": ["type": "string"]], required: ["name"])),
+            .init(name: "open_app", description: "Opens an app by name, like Spotify or WhatsApp, behind what the user is doing.",
+                  schema: schema(["name": ["type": "string"], "bring_to_front": show], required: ["name"])),
             .init(name: "close_app", description: "Quits an app by name, the same as choosing Quit from its menu. "
                   + "Most apps just close. An app with unsaved work may show its own save question, which the user answers.",
                   schema: schema(["name": ["type": "string"]], required: ["name"])),
             .init(name: "open_url", description: "Opens a web address in the browser, or a link into an app (spotify, whatsapp, notion, slack, zoommtg). "
                   + "To put a search on screen, open the results page directly.",
-                  schema: schema(["url": ["type": "string"]], required: ["url"])),
+                  schema: schema(["url": ["type": "string"], "bring_to_front": show], required: ["url"])),
             .init(name: "click", description: "Clicks something on screen: a number from the latest list, or x,y in the latest screenshot.",
                   schema: schema([
                       "element": ["type": "integer"], "x": ["type": "number"], "y": ["type": "number"],
@@ -248,12 +265,13 @@ final class Hands {
         }
 
         if let line = Self.progress(name, arguments) { onProgress(line) }
+        if Self.screenTools.contains(name) { await bringForward() }
         let result: ToolServer.Result
         switch name {
         case "look": result = await look()
         case "find_files":
             result = ToolServer.Result(text: await MacTools.findFiles(arguments["query"] as? String ?? "", kind: arguments["kind"] as? String ?? "any"))
-        case "open_file": result = await openFile(arguments["path"] as? String ?? "")
+        case "open_file": result = await openFile(arguments["path"] as? String ?? "", show: bringToFront(arguments))
         case "system_info": result = ToolServer.Result(text: await MacTools.systemInfo())
         case "read_page": result = await readPage()
         case "read_messages": result = await readMessages(arguments)
@@ -276,8 +294,8 @@ final class Hands {
             let forgotten = memory?.forget(arguments["fact"] as? String ?? "") ?? false
             result = forgotten ? ToolServer.Result(text: "Forgotten.") : Self.refuse("That isn't on the list. Use its exact words.")
         case "meeting_notes": result = ToolServer.Result(text: meetingNotes(arguments["action"] as? String ?? ""))
-        case "open_app": result = await openApp(arguments["name"] as? String ?? "")
-        case "open_url": result = await openURL(arguments["url"] as? String ?? "")
+        case "open_app": result = await openApp(arguments["name"] as? String ?? "", show: bringToFront(arguments))
+        case "open_url": result = await openURL(arguments["url"] as? String ?? "", show: bringToFront(arguments))
         case "close_app": result = await closeApp(arguments["name"] as? String ?? "")
         case "click": result = await click(arguments)
         case "write": result = await write(arguments["text"] as? String ?? "")
@@ -315,7 +333,8 @@ final class Hands {
     }
 
     private func readPage() async -> ToolServer.Result {
-        let app = NSWorkspace.shared.frontmostApplication
+        // Something opened in the background can be read where it is, without coming forward.
+        let app = waitingBehind.flatMap { $0.isTerminated ? nil : $0 } ?? NSWorkspace.shared.frontmostApplication
         guard let page = await ScreenElements.windowText(pid: app?.processIdentifier ?? 0, bundleID: app?.bundleIdentifier),
               !page.text.isEmpty else {
             return Self.refuse("Couldn't read any words from this window. Use look instead.")
@@ -368,7 +387,7 @@ final class Hands {
     /// Opens what a background task made, from its bar. Plain paths are in the Case folder.
     func openResult(_ path: String) {
         let place = workspace.place(path)
-        Task { _ = await openFile(place.url.path) }
+        Task { _ = await openFile(place.url.path, show: true) }
     }
 
     private func writeFile(_ arguments: [String: Any]) async -> ToolServer.Result {
@@ -412,7 +431,7 @@ final class Hands {
 
     // MARK: Open
 
-    private func openFile(_ path: String) async -> ToolServer.Result {
+    private func openFile(_ path: String, show: Bool) async -> ToolServer.Result {
         let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder) else { return Self.refuse("There's no file at \(path).") }
@@ -421,33 +440,115 @@ final class Hands {
               isFolder.boolValue || !FileManager.default.isExecutableFile(atPath: url.path) else {
             return Self.refuse("That's a program, so it can't be opened this way. The user can open it themselves.")
         }
-        guard (try? await NSWorkspace.shared.open(url, configuration: NSWorkspace.OpenConfiguration())) != nil else {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
+        guard let app = try? await NSWorkspace.shared.open(url, configuration: configuration) else {
             return Self.refuse("Couldn't open \(path).")
         }
+        if !show { await keepInFront(previous, over: app) }
         try? await Task.sleep(for: .milliseconds(600))
         listIsCurrent = false
-        return ToolServer.Result(text: "Opened \(url.lastPathComponent). Use look to see it.")
+        return ToolServer.Result(text: "Opened \(url.lastPathComponent)" + (show ? ". Use look to see it." : leftBehind(app)))
     }
 
-    private func openApp(_ name: String) async -> ToolServer.Result {
+    private func openApp(_ name: String, show: Bool) async -> ToolServer.Result {
         guard let url = Self.findApp(named: name) else { return Self.refuse("No app called \"\(name)\" is installed.") }
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
+        configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
         do {
             let app = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-            // Give it a moment to come to the front, so the next step lands in it.
-            for _ in 0..<30 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-            try? await Task.sleep(for: .milliseconds(400))
-            // Running with its window closed (WhatsApp does this): click its Dock icon, which brings one back.
-            if !ScreenElements.hasWindow(app.processIdentifier), ScreenElements.pressDockIcon(named: app.localizedName ?? name) {
-                try? await Task.sleep(for: .milliseconds(700))
-            }
             listIsCurrent = false
+            guard show else {
+                await keepInFront(previous, over: app)
+                return ToolServer.Result(text: "Opened \(app.localizedName ?? name)" + leftBehind(app))
+            }
+            await settle(app)
             return ToolServer.Result(text: "Opened \(app.localizedName ?? name). It's in front now; use look to see it.")
         } catch {
             return Self.refuse("Couldn't open \(name): \(error.localizedDescription)")
+        }
+    }
+
+    /// Claude asks for something to come to the front, but it only does if the user's own words asked for that.
+    /// "See what's on this page" means read it, and it once brought Chrome forward.
+    private func bringToFront(_ arguments: [String: Any]) -> Bool {
+        guard arguments["bring_to_front"] as? Bool == true else { return false }
+        let asked = question.contains(/(?i)\b(show me|show it|switch to|bring (it |that )?up|bring .* to the front|put .* on (my )?screen|pull up|take me to)\b/)
+        if !asked { log.append("  bring_to_front ignored: the user didn't ask to have it in front") }
+        return asked
+    }
+
+    /// Opened without taking over the screen: the user carries on, and it waits until a step needs it.
+    private func leftBehind(_ app: NSRunningApplication) -> String {
+        waitingBehind = app
+        return " in the background, so the user's work isn't interrupted. read_page can read it where it is. "
+            + "It comes to the front by itself if you look, click, write, press keys or scroll."
+    }
+
+    /// Some apps, Chrome among them, bring themselves to the front whenever they open something, whatever
+    /// they're asked. If that happens, the app you were in goes back in front once it has finished.
+    /// Activating another app from the background is ignored by macOS, so this goes through Launch Services.
+    private func keepInFront(_ previous: NSRunningApplication?, over opened: NSRunningApplication) async {
+        guard let previous, previous != opened else { return }
+        func openedIsInFront() -> Bool { NSWorkspace.shared.frontmostApplication == opened }
+        for _ in 0..<15 where !openedIsInFront() {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard openedIsInFront() else { return }
+        let name = opened.localizedName ?? "it"
+        // Sent while it's still coming forward, it loses, so it waits for that to finish first.
+        let back = await reopen(previous, after: .milliseconds(400))
+        log.append("  \(name) came to the front by itself; \(previous.localizedName ?? "the user's app") \(back ? "is back in front" : "couldn't be put back")")
+    }
+
+    /// Puts an app back in front. macOS ignores activate() from an app in the background, so this goes
+    /// through Launch Services, which also works for Case itself. True once it's in front.
+    private func reopen(_ app: NSRunningApplication, after wait: Duration) async -> Bool {
+        guard !app.isTerminated, let bundle = app.bundleURL else { return false }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        for delay in [wait, .milliseconds(600)] {
+            try? await Task.sleep(for: delay)
+            _ = try? await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
+            try? await Task.sleep(for: .milliseconds(200))
+            if NSWorkspace.shared.frontmostApplication == app { return true }
+        }
+        return false
+    }
+
+    /// Once the turn is over: if a step had to bring an app forward to work in it, like Slack to type a
+    /// message, the user goes back to what they were doing.
+    func goBack() async {
+        guard broughtForward, let returnTo, NSWorkspace.shared.frontmostApplication != returnTo else { return }
+        broughtForward = false
+        let back = await reopen(returnTo, after: .milliseconds(300))
+        log.append("Went back to \(returnTo.localizedName ?? "the user's app"): \(back ? "done" : "didn't work")")
+    }
+
+    /// The step needs the screen, so what was opened in the background comes forward now.
+    private func bringForward() async {
+        guard let app = waitingBehind else { return }
+        waitingBehind = nil
+        guard !app.isTerminated, NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier else { return }
+        // A background app can't bring another forward with activate(), so this also goes through Launch Services.
+        _ = await reopen(app, after: .zero)
+        await settle(app)
+        listIsCurrent = false
+        broughtForward = true
+        log.append("  brought \(app.localizedName ?? "the app") forward to work in it")
+    }
+
+    /// Waits for an app to come to the front with a window, so the next step lands in it.
+    private func settle(_ app: NSRunningApplication) async {
+        for _ in 0..<30 where NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try? await Task.sleep(for: .milliseconds(400))
+        // Running with its window closed (WhatsApp does this): click its Dock icon, which brings one back.
+        if !ScreenElements.hasWindow(app.processIdentifier), let name = app.localizedName, ScreenElements.pressDockIcon(named: name) {
+            try? await Task.sleep(for: .milliseconds(700))
         }
     }
 
@@ -503,17 +604,23 @@ final class Hands {
             ?? named.filter { wanted.count >= 4 && $0.name.contains(wanted) }.min { $0.name.count < $1.name.count }?.app
     }
 
-    private func openURL(_ address: String) async -> ToolServer.Result {
+    private func openURL(_ address: String, show: Bool) async -> ToolServer.Result {
         var address = address.trimmingCharacters(in: .whitespacesAndNewlines)
         let isAppLink = URL(string: address)?.scheme.map { Self.linkSchemes.contains($0.lowercased()) } == true
         if !address.contains("://"), !isAppLink { address = "https://" + address }
         guard let url = URL(string: address), let scheme = url.scheme?.lowercased(), Self.linkSchemes.contains(scheme) else {
             return Self.refuse("Only web addresses and app links can be opened.")
         }
-        NSWorkspace.shared.open(url)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
+        guard let app = try? await NSWorkspace.shared.open(url, configuration: configuration) else {
+            return Self.refuse("Couldn't open \(url.absoluteString).")
+        }
+        if !show { await keepInFront(previous, over: app) }
         try? await Task.sleep(for: .seconds(1))
         listIsCurrent = false
-        return ToolServer.Result(text: "Opened \(url.absoluteString); use look to see it.")
+        return ToolServer.Result(text: "Opened \(url.absoluteString)" + (show ? "; use look to see it." : leftBehind(app)))
     }
 
     /// Matches "spotify", "WhatsApp", "system settings" to an installed app.
