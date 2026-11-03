@@ -92,6 +92,10 @@ final class ClaudeSession {
         - Use read_page before scrolling or using look to find something in a page or document.
         - For iMessage and texts, use read_messages and send_imessage instead of the Messages window, so nothing \
         moves on screen. If they just say "message Rahul" without saying which app, ask which one in a few words.
+        - In Slack or Discord, go to a person or channel with the quick switcher, not the sidebar: open_app, then \
+        press_keys cmd+k, write their name, look to check the first match is them, press_keys return, write the \
+        message, and press_keys return to send. If it's the wrong person or there's no match, press escape and say so. \
+        Never write anything until the right conversation is open, so nothing lands in someone else's message box.
         - To make anything, like a spreadsheet, script, document, report or download, or to run a command, use \
         start_task straight away, even if it looks quick. Don't look anything up first; the task does its own \
         research. It runs separately, so the user can keep asking you things, and they can watch or stop it in \
