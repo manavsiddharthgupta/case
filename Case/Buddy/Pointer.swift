@@ -531,7 +531,7 @@ private struct CaptionView: View {
                     }
             case .answer:
                 ScrollView {
-                    Text(caption.text)
+                    FormattedText(text: caption.text)
                         .frame(width: Self.width, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { answerHeight = $0 }
