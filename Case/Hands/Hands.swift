@@ -435,9 +435,11 @@ final class Hands {
         }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
         guard let app = try? await NSWorkspace.shared.open(url, configuration: configuration) else {
             return Self.refuse("Couldn't open \(path).")
         }
+        if !show { await keepInFront(previous, over: app) }
         try? await Task.sleep(for: .milliseconds(600))
         listIsCurrent = false
         return ToolServer.Result(text: "Opened \(url.lastPathComponent)" + (show ? ". Use look to see it." : leftBehind(app)))
@@ -447,10 +449,14 @@ final class Hands {
         guard let url = Self.findApp(named: name) else { return Self.refuse("No app called \"\(name)\" is installed.") }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
         do {
             let app = try await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
             listIsCurrent = false
-            guard show else { return ToolServer.Result(text: "Opened \(app.localizedName ?? name)" + leftBehind(app)) }
+            guard show else {
+                await keepInFront(previous, over: app)
+                return ToolServer.Result(text: "Opened \(app.localizedName ?? name)" + leftBehind(app))
+            }
             await settle(app)
             return ToolServer.Result(text: "Opened \(app.localizedName ?? name). It's in front now; use look to see it.")
         } catch {
@@ -463,6 +469,27 @@ final class Hands {
         waitingBehind = app
         return " in the background, so the user's work isn't interrupted. read_page can read it where it is. "
             + "It comes to the front by itself if you look, click, write, press keys or scroll."
+    }
+
+    /// Some apps, Chrome among them, bring themselves to the front whenever they open something, whatever
+    /// they're asked. If that happens, the app you were in goes back in front once it has finished.
+    /// Activating another app from the background is ignored by macOS, so this goes through Launch Services.
+    private func keepInFront(_ previous: NSRunningApplication?, over opened: NSRunningApplication) async {
+        guard let previous, previous != opened, let bundle = previous.bundleURL else { return }
+        func openedIsInFront() -> Bool { NSWorkspace.shared.frontmostApplication == opened }
+        for _ in 0..<15 where !openedIsInFront() {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard openedIsInFront() else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        // Sent while it's still coming forward, it loses, so it waits for that to finish first.
+        for wait in [400, 600] {
+            try? await Task.sleep(for: .milliseconds(wait))
+            _ = try? await NSWorkspace.shared.openApplication(at: bundle, configuration: configuration)
+            try? await Task.sleep(for: .milliseconds(200))
+            if NSWorkspace.shared.frontmostApplication == previous { return }
+        }
     }
 
     /// The step needs the screen, so what was opened in the background comes forward now.
@@ -548,9 +575,11 @@ final class Hands {
         }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = show
+        let previous = NSWorkspace.shared.frontmostApplication
         guard let app = try? await NSWorkspace.shared.open(url, configuration: configuration) else {
             return Self.refuse("Couldn't open \(url.absoluteString).")
         }
+        if !show { await keepInFront(previous, over: app) }
         try? await Task.sleep(for: .seconds(1))
         listIsCurrent = false
         return ToolServer.Result(text: "Opened \(url.absoluteString)" + (show ? "; use look to see it." : leftBehind(app)))
